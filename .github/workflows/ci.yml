@@ -56,7 +56,7 @@ jobs:
     env:
       YQ_VERSION: v4.52.5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install yq ${{ env.YQ_VERSION }}
         run: |
