@@ -9,6 +9,11 @@ receivers:
   # This was the failure that made an earlier version of this config ship
   # raw text instead of parsing — parsed records with no timestamp were
   # rejected downstream. The timestamp_guard processor backstops that.
+  #
+  # Multi-line payloads are NOT reassembled — each datagram is parsed on
+  # its own, so a pretty-printed JSON frame becomes one record per line
+  # and every line after the first is tagged syslog_header. `linkcheck`
+  # is the known case; see docs/known-issues.md and issue #9.
   syslog/unifi_udp:
     udp:
       listen_address: 0.0.0.0:5514
