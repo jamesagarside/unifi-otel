@@ -111,11 +111,23 @@ jobs:
             echo "| $1 | $2 | $3 | $4 | $5 |" >> "$GITHUB_STEP_SUMMARY"
           }
 
+          # This step runs under `bash -e`, so a bare `out=$(cmd)` that
+          # exits non-zero kills the step THERE — before the summary row
+          # and the ::error:: annotation below it are ever written.
+          #
+          # That is fatal for a check whose whole job is to notice a
+          # failure: permutation 3 expects a non-zero exit by design, and
+          # 1 and 2 produce their most valuable output precisely when
+          # they fail. So every capture below uses `|| rc=$?`, which is a
+          # compound command and therefore exempt from -e.
+          #
+          # Do not "simplify" these back to a bare assignment.
+
           # ── 1. default four files, no SNMP environment ─────────────
           echo "::group::1. default four files (expect exit 0)"
+          rc1=0
           out1=$(docker run --rm -v "$PWD/collector":/conf:ro "$IMAGE" \
-                   validate "${BASE[@]}" 2>&1)
-          rc1=$?
+                   validate "${BASE[@]}" 2>&1) || rc1=$?
           echo "$out1"
           echo "exit=$rc1"
           echo "::endgroup::"
@@ -129,11 +141,11 @@ jobs:
 
           # ── 2. all seven files, credentials supplied ───────────────
           echo "::group::2. all seven files with credentials (expect exit 0)"
+          rc2=0
           out2=$(docker run --rm \
                    -e UNIFI_SNMP_USER=ci -e UNIFI_SNMP_PASSWORD=ci-not-a-real-secret \
                    -v "$PWD/collector":/conf:ro "$IMAGE" \
-                   validate "${BASE[@]}" "${SNMP[@]}" 2>&1)
-          rc2=$?
+                   validate "${BASE[@]}" "${SNMP[@]}" 2>&1) || rc2=$?
           echo "$out2"
           echo "exit=$rc2"
           echo "::endgroup::"
@@ -150,9 +162,9 @@ jobs:
           # would give a non-zero exit and the control would pass while
           # proving nothing. The message has to name the SNMP receiver.
           echo "::group::3. all seven files WITHOUT credentials (expect non-zero)"
+          rc3=0
           out3=$(docker run --rm -v "$PWD/collector":/conf:ro "$IMAGE" \
-                   validate "${BASE[@]}" "${SNMP[@]}" 2>&1)
-          rc3=$?
+                   validate "${BASE[@]}" "${SNMP[@]}" 2>&1) || rc3=$?
           echo "$out3"
           echo "exit=$rc3"
           echo "::endgroup::"
