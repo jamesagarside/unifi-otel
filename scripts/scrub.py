@@ -428,6 +428,68 @@ CEF_VALUE_KINDS = {
     "UNIFIsrcDomain": "domain",
 }
 
+# JSON payload keys, scrubbed by key the same way CEF values are.
+#
+# Added after the first REAL capture, which is the whole argument for a
+# hybrid corpus: `linkcheck` emits a pretty-printed speedtest result and
+# none of this was reachable by the generic sweep, because none of it is
+# address-shaped. A synthetic corpus could not have surfaced it -- nobody
+# invents a fixture containing their own ISP.
+#
+# Why these are identifying, given they describe a speedtest SERVER
+# rather than the household:
+#
+#   * a speedtest picks NEARBY servers, so the set of cities is a coarse
+#     location fix on whoever is running it
+#   * `timezone` is not the server's at all, it is the reporting device's
+#     -- the same value this project already scrubs to Etc/UTC in the
+#     collector config precisely because it is site-identifying
+#   * provider / providerUrl name real companies and real domains
+#
+# coredns keys are listed too. The sweep already catches `domain`,
+# `src_ip` and `mac` because they are address-shaped; naming them here
+# makes the coverage intentional rather than incidental.
+JSON_VALUE_KINDS = {
+    # linkcheck / speedtest
+    "provider": "isp",
+    "providerUrl": "domain",
+    "city": "geo",
+    "region": "geo",
+    "regionName": "geo",
+    "country": "geo",
+    "countryCode": "geo_code",
+    "timezone": "tz",
+    "latitude": "coord",
+    "longitude": "coord",
+    "lat": "coord",
+    "lon": "coord",
+    "isp": "isp",
+    "org": "isp",
+    "as": "asn",
+    "asn": "asn",
+    # coredns
+    "domain": "domain",
+    "src_ip": "ip",
+    "dst_ip": "ip",
+    "ip": "ip",
+    "mac": "mac",
+}
+
+# Matches "key": value inside a JSON object, for string and numeric
+# values. Deliberately tolerant of the pretty-printed one-pair-per-line
+# form linkcheck emits: the frame arrives split across datagrams, so a
+# whole-object json.loads is not available at this point.
+_JSON_PAIR_RE = re.compile(
+    r'"([A-Za-z_][A-Za-z0-9_]*)"(\s*:\s*)'
+    r'(?:"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?))'
+)
+
+# Every scrubbed coordinate becomes exactly this. Collapsing every server
+# to one point is fine for a fixture -- the parsers do not read it -- and
+# it makes "is this scrubbed?" a trivial equality test for --check.
+SCRUBBED_COORD = "0.0"
+SCRUBBED_TZ = "Etc/UTC"
+
 # ═════════════════════════════════════════════════════════════════════
 #  End of allowlist. Below here is machinery.
 # ═════════════════════════════════════════════════════════════════════
@@ -534,6 +596,16 @@ _DOMAIN_RE = re.compile(
     r"(?![A-Za-z0-9_/-])"
 )
 _HOMEDIR_RE = re.compile(r"(?<=/home/)([A-Za-z0-9._-]+)")
+
+# The host of a URL. _DOMAIN_RE deliberately refuses to match after "/" so
+# that it cannot eat a path segment (/usr/lib/thing.sh), and the price of
+# that is it cannot see the host in "https://example.co.uk" either. This
+# rule pays it back, anchored tightly on "://" so it can only ever fire on
+# a real authority component.
+#
+# Found by the first real capture: linkcheck's providerUrl carried live
+# company domains straight through a scrub that reported success.
+_URL_HOST_RE = re.compile(r"(?<=://)([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)")
 
 # ── Positional shapes inside the message body ────────────────────────
 # dnsmasq-dhcp. Mirrors the ExtractPatterns in transform/device_syslog
@@ -930,7 +1002,51 @@ class Scrubber:
             return self._scrub_geo_code(value)
         if kind == "cidr":
             return self._scrub_cidr(value)
+        if kind == "tz":
+            return self._scrub_tz(value)
+        if kind == "coord":
+            return self._scrub_coord(value)
         return self._scrub_name(kind, value)
+
+    def _scrub_tz(self, value: str) -> str:
+        # Etc/UTC is what the collector config itself defaults to, so a
+        # scrubbed fixture and the shipped default agree. Already-scrubbed
+        # input passes through, which is what keeps --check exact.
+        if value == SCRUBBED_TZ:
+            return value
+        self._note("timezone", value)
+        return SCRUBBED_TZ
+
+    def _scrub_coord(self, value: str) -> str:
+        # Numeric in, numeric out, so the JSON stays well-formed and the
+        # value keeps its type. Any coordinate that is not the placeholder
+        # is by definition unscrubbed, which is the whole detection rule.
+        if value == SCRUBBED_COORD:
+            return value
+        self._note("coordinate", value)
+        return SCRUBBED_COORD
+
+    def _scrub_json_pairs(self, text: str) -> str:
+        """Rewrite "key": value pairs whose key is in JSON_VALUE_KINDS.
+
+        Runs before the generic sweep so that key-directed handling wins:
+        `providerUrl` should go through the domain mapping as a domain,
+        not be half-rewritten as an incidental URL.
+        """
+        if '"' not in text:
+            return text
+
+        def _one(match):
+            key, sep = match.group(1), match.group(2)
+            svalue, nvalue = match.group(3), match.group(4)
+            kind = JSON_VALUE_KINDS.get(key)
+            if not kind:
+                return match.group(0)
+            if nvalue is not None:                       # bare number
+                return f'"{key}"{sep}{self._scrub_by_kind(kind, nvalue)}'
+            return f'"{key}"{sep}"{self._scrub_by_kind(kind, svalue)}"'
+
+        return _JSON_PAIR_RE.sub(_one, text)
 
     # ── the generic sweep ────────────────────────────────────────────
     def _sweep(self, text: str) -> str:
@@ -979,6 +1095,18 @@ class Scrubber:
             return new_local + "@" + self._scrub_domain(domain)
 
         text = _EMAIL_RE.sub(_email, text)
+
+        def _url_host(match):
+            host = match.group(1)
+            if "." not in host:
+                return host          # bare hostname, no registrable domain
+            try:
+                ipaddress.ip_address(host)
+                return host          # already rewritten by the IP rules above
+            except ValueError:
+                return self._scrub_domain(host)
+
+        text = _URL_HOST_RE.sub(_url_host, text)
         text = _DOMAIN_RE.sub(lambda m: self._scrub_domain(m.group(1)), text)
         text = _HOMEDIR_RE.sub(lambda m: self._scrub_name("user", m.group(1)), text)
         return text
@@ -1041,6 +1169,13 @@ class Scrubber:
 
     # ── message body, non-CEF ────────────────────────────────────────
     def _scrub_message(self, text: str) -> str:
+        # JSON pairs first, so a key-directed rule wins over the generic
+        # sweep. This also catches linkcheck CONTINUATION lines, which have
+        # no syslog header at all and arrive here via _scrub_body -- each
+        # pretty-printed line is its own datagram, so there is never a
+        # whole JSON object to parse.
+        text = self._scrub_json_pairs(text)
+
         # DHCP: only the trailing client-supplied hostname is positional. The
         # IP and MAC are ordinary tokens and the sweep gets them, which is
         # exactly what keeps DHCPDISCOVER (MAC in the IP's slot) intact --
