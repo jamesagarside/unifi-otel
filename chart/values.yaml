@@ -58,7 +58,6 @@ opentelemetry-collector:
   # deployment rather than a daemonset.
   mode: deployment
   replicaCount: 1
-
   # contrib, not core: syslogreceiver, snmpreceiver, the transform and
   # metricsgeneration processors and the routing connector are all
   # contrib components.
@@ -71,7 +70,6 @@ opentelemetry-collector:
     repository: otel/opentelemetry-collector-contrib
     tag: "0.157.0"
     pullPolicy: IfNotPresent
-
   # ── Ports ──────────────────────────────────────────────────────────
   # The receivers bind unprivileged ports inside the container so the pod
   # can run as non-root; the standard syslog ports are mapped onto them at
@@ -108,7 +106,6 @@ opentelemetry-collector:
       # The collector's own internal metrics. Enable if you want to scrape
       # them; the pipeline does not depend on it.
       enabled: false
-
     syslog-udp:
       enabled: true
       containerPort: 5514
@@ -119,7 +116,6 @@ opentelemetry-collector:
       containerPort: 6601
       servicePort: 601
       protocol: TCP
-
   # ── Service ────────────────────────────────────────────────────────
   # Neutral defaults. A UniFi console sends syslog to a fixed address, so
   # in practice this wants to be a LoadBalancer with a pinned address —
@@ -137,7 +133,6 @@ opentelemetry-collector:
   service:
     type: ClusterIP
     annotations: {}
-
   # ── Environment ────────────────────────────────────────────────────
   # This is a LIST, so anything you supply REPLACES it wholesale rather
   # than merging. Restate these two entries in your own values file.
@@ -156,7 +151,6 @@ opentelemetry-collector:
       value: "otel-gateway.observability.svc.cluster.local:4317"
     - name: UNIFI_SYSLOG_TIMEZONE
       value: "Etc/UTC"
-
   # envFrom sources. A separate list from extraEnvs, so putting the SNMP
   # Secret here leaves the two variables above intact:
   #
@@ -164,14 +158,12 @@ opentelemetry-collector:
   #     - secretRef:
   #         name: unifi-snmp
   extraEnvsFrom: []
-
   # memory_limiter in the pipeline is configured with limit_percentage, so
   # it measures itself against this limit. With no limit set it measures
   # against total host memory instead and will not protect anything.
   resources:
     limits:
       memory: 512Mi
-
   # Left at the upstream defaults on purpose. The receivers bind 5514 and
   # 6601, so the pod needs no added capability and no privileged port; the
   # contrib image already runs as a non-root user. Harden further from
@@ -180,25 +172,71 @@ opentelemetry-collector:
   # inheriting this project's opinion.
   podSecurityContext: {}
   securityContext: {}
-
   # ── The pipeline ───────────────────────────────────────────────────
   # collector/10-receivers-logs.yaml, 20-processors-logs.yaml,
   # 40-exporters.yaml and 90-service.yaml, deep-merged. Annotated
   # originals live in collector/.
   alternateConfig:
     receivers:
+      # ── Syslog ────────────────────────────────────────────────────────
+      # Bound to unprivileged ports inside the container so the pod can run
+      # as non-root; map the standard 514/601 onto them at the Service,
+      # Compose port mapping or firewall, whichever your deployment uses.
+      #
+      # allow_skip_pri_header keeps non-conforming UDM frames (long firewall
+      # lines, JSON blobs without a PRI) from being dropped as parse errors.
+      # This was the failure that made an earlier version of this config ship
+      # raw text instead of parsing — parsed records with no timestamp were
+      # rejected downstream. The timestamp_guard processor backstops that.
+      #
+      # Multi-line payloads are NOT reassembled — each datagram is parsed on
+      # its own, so a pretty-printed JSON frame becomes one record per line
+      # and every line after the first is tagged syslog_header. `linkcheck`
+      # is the known case; see docs/known-issues.md and issue #9.
       syslog/unifi_udp:
         udp:
           listen_address: 0.0.0.0:5514
         protocol: rfc3164
+        # ⚠ SET THIS TO YOUR OWN TIMEZONE. The UDM stamps RFC3164 syslog in
+        # LOCAL time with no offset, so this must match the UDM's timezone or
+        # every non-CEF record lands hours out. Verified 2026-08-11 against
+        # the UNIFIutcTime CEF field: with UTC here, records land one hour in
+        # the future during BST.
+        #
+        # It fails SILENTLY — there is no error, just wrong timestamps. An
+        # unset env var expands to empty and the receiver falls back to UTC
+        # (verified against 0.157.0), which is why there is a default here
+        # rather than a bare ${env:...}. Set the variable explicitly in your
+        # deployment; the default only catches someone who has cloned this
+        # and not read the README.
+        #
+        # To check: compare a device-syslog timestamp against the wall clock
+        # on the UDM. A whole number of hours out means this is wrong.
+        #
+        # This only backstops non-CEF frames now — transform/unifi_ecs
+        # re-stamps every CEF record from UNIFIutcTime, which is UTC and
+        # millisecond-precise where the syslog header is local and truncated
+        # to the second.
         location: ${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}
         allow_skip_pri_header: true
         operators: &unifi_syslog_operators
+          # UniFi is not wholly CEF — only events routed through the SIEM
+          # Server are. The operator is conditional, so ordinary syslog
+          # passes through with just the RFC3164 fields set.
+          #
+          # The syslog parser writes to attributes, NOT body: the message
+          # text lands in attributes.message and body keeps the raw frame.
+          #
+          # Only the CEF envelope is split here; the extension string is
+          # turned into a map by transform/cef_extensions below. Capture
+          # groups are all cef_-prefixed so the cleanup stage can drop the
+          # working set with one delete_matching_keys.
           - type: regex_parser
             if: 'attributes?.message != nil and attributes.message matches "CEF:\\d+\\|"'
             parse_from: attributes.message
             regex: 'CEF:(?P<cef_version>\d+)\|(?P<cef_vendor>[^|]*)\|(?P<cef_product>[^|]*)\|(?P<cef_device_version>[^|]*)\|(?P<cef_signature_id>[^|]*)\|(?P<cef_name>[^|]*)\|(?P<cef_severity>[^|]*)\|(?P<cef_extensions>.*)'
             on_error: send
+      # UniFi's newer SIEM Server option emits RFC5424 over TCP.
       syslog/unifi_tcp:
         tcp:
           listen_address: 0.0.0.0:6601
@@ -210,6 +248,23 @@ opentelemetry-collector:
         check_interval: 2s
         limit_percentage: 80
         spike_limit_percentage: 25
+      # ── CEF extension string → map ────────────────────────────────────
+      # CEF has no quoting, and UniFi emits values containing spaces on
+      # nearly every event (the site name, policy names, interface
+      # "Internet 1", and a whole msg= sentence). A space-split
+      # key_value_parser errors on all of them, and RE2 has no lookahead to
+      # split around them.
+      #
+      # So: rewrite each " key=" boundary to a newline, then split on that.
+      # A CEF key is [A-Za-z][A-Za-z0-9_]*, and no UniFi value contains a
+      # "word=" token, so the boundary is unambiguous. This replaced a
+      # per-field regex approach that only ever extracted 7 of the 78 keys
+      # the UDM actually emits — and whose src= pattern matched 5 of 106
+      # live records, because firewall events carry the source as
+      # UNIFIsrcClientIp, not src.
+      #
+      # Verified against the 0.157.0 image: "\n" is a real newline in an
+      # OTTL string literal and $$1 back-references the capture group.
       transform/cef_extensions:
         error_mode: ignore
         log_statements:
@@ -219,21 +274,50 @@ opentelemetry-collector:
             statements:
               - 'replace_pattern(log.attributes["cef_extensions"], "\\s([A-Za-z][A-Za-z0-9_]*)=", "\n$$1=")'
               - 'set(log.attributes["cef_kv"], ParseKeyValue(log.attributes["cef_extensions"], "=", "\n"))'
+      # ── Syslog/CEF → ECS ──────────────────────────────────────────────
+      # Naming follows the ECS ↔ OTel alignment table:
+      #   - source.ip / destination.ip are "match" pairs with the semconv
+      #     source.address / destination.address, so BOTH are emitted (an
+      #     alias is not always available downstream, and ECS-only consumers
+      #     — security detection rules — need the .ip spelling).
+      #   - ports, macs, domains, network.transport and network.direction are
+      #     spelled identically in both schemas.
+      #   - network.protocol and process.executable are NOT: the table marks
+      #     them `equivalent` to network.protocol.name /
+      #     process.executable.path, but the ECS name IS the OTel namespace,
+      #     and a document store cannot map one field as both a leaf and an
+      #     object. Keeping the ECS spelling is deliberate — see the schema
+      #     stance in the README.
+      #     process.name maps to no OTel attribute at all.
+      #   - event.*, observer.*, rule.*, user.* have no OTel counterpart,
+      #     so ECS names stand.
+      # Vendor-specific values that ECS has no home for keep a unifi.*
+      # prefix rather than being dropped.
       transform/unifi_ecs:
         error_mode: ignore
         log_statements:
+          # ---- Plain syslog envelope (applies to CEF and non-CEF alike) --
           - context: log
             statements:
               - 'set(log.attributes["observer.name"], log.attributes["hostname"]) where log.attributes["hostname"] != nil'
+              # The UDM uses the literal syslog tag "CEF" on every CEF frame,
+              # which is not a process name — only carry a real one.
               - 'set(log.attributes["process.name"], log.attributes["appname"]) where log.attributes["appname"] != nil and log.attributes["appname"] != "CEF"'
+              # proc_id is only populated by the RFC5424 parser and by RFC3164
+              # frames with a single hostname. Doubled-hostname UDM frames get
+              # their pid from transform/device_syslog instead.
               - 'set(log.attributes["process.pid"], Int(log.attributes["proc_id"])) where log.attributes["proc_id"] != nil and log.attributes["appname"] != "CEF"'
               - 'set(log.attributes["log.syslog.priority"], log.attributes["priority"]) where log.attributes["priority"] != nil'
               - 'set(log.attributes["log.syslog.facility.code"], log.attributes["facility"]) where log.attributes["facility"] != nil'
               - 'set(log.attributes["log.syslog.facility.name"], log.attributes["facility_text"]) where log.attributes["facility_text"] != nil'
+          # ---- CEF envelope → event.* / observer.* ----------------------
           - context: log
             conditions:
               - 'attributes["cef_kv"] != nil'
             statements:
+              # Keep the raw frame before body is replaced by the human
+              # message below. Non-CEF records skip this: their body is
+              # never rewritten, so a copy would be pure duplication.
               - 'set(log.attributes["event.original"], log.body) where IsString(log.body)'
               - 'set(log.attributes["event.module"], "unifi")'
               - 'set(log.attributes["event.provider"], "unifi-network")'
@@ -245,17 +329,28 @@ opentelemetry-collector:
               - 'set(log.attributes["observer.type"], "firewall")'
               - 'set(log.attributes["unifi.site"], log.attributes["cef_kv"]["UNIFIhost"])'
               - 'set(log.attributes["unifi.category"], log.attributes["cef_kv"]["UNIFIcategory"])'
+              # event.action is the CEF event name slugged: "Blocked by
+              # Firewall" → "blocked_by_firewall".
               - 'set(log.attributes["event.action"], log.attributes["cef_name"])'
               - 'replace_pattern(log.attributes["event.action"], "\\s+", "_")'
               - 'set(log.attributes["event.action"], ConvertCase(log.attributes["event.action"], "lower"))'
+              # UNIFIutcTime is UTC and millisecond-precise; the syslog
+              # header is local time truncated to the second. Prefer it.
               - 'set(log.time, Time(log.attributes["cef_kv"]["UNIFIutcTime"], "%Y-%m-%dT%H:%M:%S.%LZ")) where log.attributes["cef_kv"]["UNIFIutcTime"] != nil'
+              # ECS: message is the human-readable line, event.original the
+              # raw frame (captured above, before body is overwritten).
               - 'set(log.body, log.attributes["cef_kv"]["msg"]) where log.attributes["cef_kv"]["msg"] != nil'
+              # UniFi CEF severity runs 1 (routine) → 10 (critical).
               - 'set(log.severity_number, SEVERITY_NUMBER_INFO) where Int(log.attributes["cef_severity"]) <= 3'
               - 'set(log.severity_number, SEVERITY_NUMBER_WARN) where Int(log.attributes["cef_severity"]) > 3 and Int(log.attributes["cef_severity"]) <= 6'
               - 'set(log.severity_number, SEVERITY_NUMBER_ERROR) where Int(log.attributes["cef_severity"]) > 6'
               - 'set(log.severity_text, "INFO") where log.severity_number == SEVERITY_NUMBER_INFO'
               - 'set(log.severity_text, "WARN") where log.severity_number == SEVERITY_NUMBER_WARN'
               - 'set(log.severity_text, "ERROR") where log.severity_number == SEVERITY_NUMBER_ERROR'
+          # ---- Taxonomy: event.kind / dataset / category / type ---------
+          # Defaults first, then UNIFIcategory, then per-code refinement,
+          # so an unseen event code still lands somewhere sensible instead
+          # of falling out of the schema entirely.
           - context: log
             conditions:
               - 'attributes["cef_kv"] != nil'
@@ -264,27 +359,87 @@ opentelemetry-collector:
               - 'set(log.attributes["event.dataset"], "unifi.network")'
               - 'set(log.attributes["event.category"], ["network"])'
               - 'set(log.attributes["event.type"], ["info"])'
+              # By UniFi's own category column.
               - 'set(log.attributes["event.dataset"], "unifi.client") where log.attributes["cef_kv"]["UNIFIcategory"] == "Client Devices"'
               - 'set(log.attributes["event.dataset"], "unifi.audit") where log.attributes["cef_kv"]["UNIFIcategory"] == "Audit"'
               - 'set(log.attributes["event.dataset"], "unifi.security") where log.attributes["cef_kv"]["UNIFIcategory"] == "Security"'
               - 'set(log.attributes["event.category"], ["configuration"]) where log.attributes["cef_kv"]["UNIFIcategory"] == "Audit"'
               - 'set(log.attributes["event.type"], ["change"]) where log.attributes["cef_kv"]["UNIFIcategory"] == "Audit"'
+              # Anything carrying a firewall policy is firewall traffic.
               - 'set(log.attributes["event.dataset"], "unifi.firewall") where log.attributes["cef_kv"]["UNIFIpolicyType"] == "Firewall"'
               - 'set(log.attributes["event.category"], ["network"]) where log.attributes["cef_kv"]["UNIFIpolicyType"] == "Firewall"'
               - 'set(log.attributes["event.type"], ["connection", "denied"]) where log.attributes["cef_kv"]["act"] == "blocked"'
               - 'set(log.attributes["event.type"], ["connection", "allowed"]) where log.attributes["cef_kv"]["act"] == "allowed"'
+              # Per-code refinement (codes verified against live traffic).
+              #
+              # ---- Alerting -------------------------------------------
+              # Everything UniFi files under category Security becomes
+              # event.kind: alert, EXCEPT policy enforcement.
+              #
+              # Deny-list on purpose. An allow-list of known-bad codes
+              # silently missed code 201 ("a network intrusion attempt has
+              # been detected and blocked") because 201 had not yet occurred
+              # when the taxonomy was written. Defaulting an unseen security
+              # code to alert fails loud instead of silent.
+              #
+              # UNIFIpolicyType is the discriminator UniFi actually provides:
+              #   Firewall  → policy enforcement (the overwhelming majority
+              #               of Security records; "blocked from accessing X
+              #               by the <name> Firewall Policy")
+              #   IDS/IPS   → a detection (code 201, UNIFIpolicyName carries
+              #               the signature, e.g. "Scanning Activity")
+              # ECS already has a home for enforcement — event.type:
+              # [connection, denied] — and promoting it would bury real
+              # detections under one alert every couple of minutes.
+              #
+              # Code 203 is excluded as well as, not instead of, the policy
+              # type: 203s have been observed carrying no UNIFIpolicyType at
+              # all, so the policy-type test alone would have alerted them.
+              #
+              # Both tests read UNIFIcategory / UNIFIpolicyType, UniFi's own
+              # columns — NOT our event.dataset. Firewall records are
+              # reclassified to unifi.firewall, so they carry category
+              # Security but dataset unifi.firewall.
               - 'set(log.attributes["event.kind"], "alert") where log.attributes["cef_kv"]["UNIFIcategory"] == "Security" and log.attributes["cef_signature_id"] != "203" and log.attributes["cef_kv"]["UNIFIpolicyType"] != "Firewall"'
               - 'set(log.attributes["event.category"], ["intrusion_detection", "network"]) where log.attributes["cef_kv"]["UNIFIcategory"] == "Security" and log.attributes["cef_signature_id"] != "203" and log.attributes["cef_kv"]["UNIFIpolicyType"] != "Firewall"'
+              # 202 Honeypot Triggered is a state observation, not a blocked
+              # connection, so it keeps event.type: [info] rather than the
+              # [connection, denied] that act=blocked would otherwise set.
               - 'set(log.attributes["event.type"], ["info"]) where log.attributes["cef_signature_id"] == "202"'
+              # 401/404 client disconnect, 403 connect, 402 roam.
               - 'set(log.attributes["event.type"], ["connection", "end"]) where log.attributes["cef_signature_id"] == "401" or log.attributes["cef_signature_id"] == "404"'
               - 'set(log.attributes["event.type"], ["connection", "start"]) where log.attributes["cef_signature_id"] == "403" or log.attributes["cef_signature_id"] == "405"'
               - 'set(log.attributes["event.type"], ["connection", "change"]) where log.attributes["cef_signature_id"] == "402"'
+              # 544 Network Accessed — an admin signing in to UniFi Network.
               - 'set(log.attributes["event.category"], ["authentication"]) where log.attributes["cef_signature_id"] == "544"'
               - 'set(log.attributes["event.type"], ["start"]) where log.attributes["cef_signature_id"] == "544"'
               - 'set(log.attributes["event.outcome"], "success") where log.attributes["cef_signature_id"] == "544"'
+              # 546 Config Modified.
               - 'set(log.attributes["event.category"], ["configuration"]) where log.attributes["cef_signature_id"] == "546"'
               - 'set(log.attributes["event.type"], ["change"]) where log.attributes["cef_signature_id"] == "546"'
+          # ---- Non-CEF syslog fallback ----------------------------------
+          # Plain syslog from the UDM (anything not routed through the SIEM
+          # Server) still gets a dataset, so no UniFi record leaves this
+          # collector outside the schema. Deliberately scoped to cef_kv ==
+          # nil: a CEF record reaching the end with no dataset is a hole in
+          # the taxonomy, and transform/tag_mapping_failures must still be
+          # able to see it.
           - context: log
+            # NOTE: process.name cannot be taken from the syslog `appname`
+            # field. The UDM emits a DOUBLED hostname —
+            #   <13>Aug 12 16:02:02 Gateway Gateway coredns[4155]: {...}
+            # — so the RFC3164 parser consumes the first hostname, finds the
+            # second one is not a valid tag (no colon), and leaves appname
+            # UNSET with the tag still inside `message`. On CEF records the
+            # opposite happens: "CEF:" looks like a tag, so appname is the
+            # literal string "CEF". Mapping appname → process.name therefore
+            # yields nothing useful for device logs and pollutes every CEF
+            # record. Verified by replay.
+            # transform/device_syslog below recovers it with a regex over
+            # `message`, which is why the appname rule above is kept as well:
+            # it is the correct source on any device that does NOT double its
+            # hostname, and device_syslog defers to it.
+
             conditions:
               - 'attributes["cef_kv"] == nil'
             statements:
@@ -295,6 +450,9 @@ opentelemetry-collector:
               - 'set(log.attributes["event.category"], ["network"])'
               - 'set(log.attributes["event.type"], ["info"])'
               - 'set(log.attributes["observer.vendor"], "Ubiquiti")'
+          # ---- Network 5-tuple ------------------------------------------
+          # Source precedence: firewall events use UNIFIsrcClientIp, client
+          # events UNIFIclientIp, audit events the bare CEF src.
           - context: log
             conditions:
               - 'attributes["cef_kv"] != nil'
@@ -311,6 +469,7 @@ opentelemetry-collector:
               - 'set(log.attributes["destination.port"], Int(log.attributes["cef_kv"]["dpt"])) where log.attributes["cef_kv"]["dpt"] != nil'
               - 'set(log.attributes["destination.domain"], log.attributes["cef_kv"]["UNIFIdstDomain"]) where log.attributes["cef_kv"]["UNIFIdstDomain"] != nil'
               - 'set(log.attributes["destination.geo.country_iso_code"], log.attributes["cef_kv"]["UNIFIdstRegion"]) where log.attributes["cef_kv"]["UNIFIdstRegion"] != nil'
+              # OTel semconv twins of source.ip / destination.ip.
               - 'set(log.attributes["source.address"], log.attributes["source.ip"]) where log.attributes["source.ip"] != nil'
               - 'set(log.attributes["destination.address"], log.attributes["destination.ip"]) where log.attributes["destination.ip"] != nil'
               - 'set(log.attributes["network.transport"], ConvertCase(log.attributes["cef_kv"]["proto"], "lower")) where log.attributes["cef_kv"]["proto"] != nil'
@@ -326,6 +485,8 @@ opentelemetry-collector:
               - 'set(log.attributes["observer.ingress.interface.name"], log.attributes["cef_kv"]["deviceInboundInterface"]) where log.attributes["cef_kv"]["deviceInboundInterface"] != nil'
               - 'set(log.attributes["observer.egress.interface.name"], log.attributes["cef_kv"]["deviceOutboundInterface"]) where log.attributes["cef_kv"]["deviceOutboundInterface"] != nil'
               - 'set(log.attributes["user.name"], log.attributes["cef_kv"]["UNIFIadmin"]) where log.attributes["cef_kv"]["UNIFIadmin"] != nil'
+              # related.* is built branch-wise: OTTL list literals would
+              # otherwise embed nils for the absent side.
               - 'set(log.attributes["related.ip"], [log.attributes["source.ip"], log.attributes["destination.ip"]]) where log.attributes["source.ip"] != nil and log.attributes["destination.ip"] != nil'
               - 'set(log.attributes["related.ip"], [log.attributes["source.ip"]]) where log.attributes["source.ip"] != nil and log.attributes["destination.ip"] == nil'
               - 'set(log.attributes["related.ip"], [log.attributes["destination.ip"]]) where log.attributes["source.ip"] == nil and log.attributes["destination.ip"] != nil'
@@ -333,6 +494,7 @@ opentelemetry-collector:
               - 'set(log.attributes["related.hosts"], [log.attributes["source.domain"], log.attributes["destination.domain"]]) where log.attributes["source.domain"] != nil and log.attributes["destination.domain"] != nil'
               - 'set(log.attributes["related.hosts"], [log.attributes["source.domain"]]) where log.attributes["source.domain"] != nil and log.attributes["destination.domain"] == nil'
               - 'set(log.attributes["related.hosts"], [log.attributes["destination.domain"]]) where log.attributes["source.domain"] == nil and log.attributes["destination.domain"] != nil'
+          # ---- Vendor fields ECS has no home for ------------------------
           - context: log
             conditions:
               - 'attributes["cef_kv"] != nil'
@@ -348,6 +510,7 @@ opentelemetry-collector:
               - 'set(log.attributes["unifi.flow.count"], Int(log.attributes["cef_kv"]["UNIFIflowCount"])) where log.attributes["cef_kv"]["UNIFIflowCount"] != nil'
               - 'set(log.attributes["unifi.network.subnet"], log.attributes["cef_kv"]["UNIFInetworkSubnet"]) where log.attributes["cef_kv"]["UNIFInetworkSubnet"] != nil'
               - 'set(log.attributes["unifi.link_speed"], log.attributes["cef_kv"]["UNIFIlinkSpeed"]) where log.attributes["cef_kv"]["UNIFIlinkSpeed"] != nil'
+              # Wi-Fi association detail (ECS has no wireless field set).
               - 'set(log.attributes["unifi.wifi.ssid"], log.attributes["cef_kv"]["UNIFIwifiName"]) where log.attributes["cef_kv"]["UNIFIwifiName"] != nil'
               - 'set(log.attributes["unifi.wifi.band"], log.attributes["cef_kv"]["UNIFIwifiBand"]) where log.attributes["cef_kv"]["UNIFIwifiBand"] != nil'
               - 'set(log.attributes["unifi.wifi.channel"], Int(log.attributes["cef_kv"]["UNIFIwifiChannel"])) where log.attributes["cef_kv"]["UNIFIwifiChannel"] != nil'
@@ -355,6 +518,7 @@ opentelemetry-collector:
               - 'set(log.attributes["unifi.wifi.rssi"], Int(log.attributes["cef_kv"]["UNIFIWiFiRssi"])) where log.attributes["cef_kv"]["UNIFIWiFiRssi"] != nil'
               - 'set(log.attributes["unifi.wifi.airtime_utilization"], Int(log.attributes["cef_kv"]["UNIFIwifiAirtimeUtilization"])) where log.attributes["cef_kv"]["UNIFIwifiAirtimeUtilization"] != nil'
               - 'set(log.attributes["unifi.wifi.interference"], Int(log.attributes["cef_kv"]["UNIFIwifiInterference"])) where log.attributes["cef_kv"]["UNIFIwifiInterference"] != nil'
+              # AP/switch the client is on, and the one it came from.
               - 'set(log.attributes["unifi.uplink.name"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceName"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceName"] != nil'
               - 'set(log.attributes["unifi.uplink.ip"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceIp"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceIp"] != nil'
               - 'set(log.attributes["unifi.uplink.mac"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceMac"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceMac"] != nil'
@@ -371,35 +535,135 @@ opentelemetry-collector:
               - 'set(log.attributes["unifi.previous_uplink.channel"], Int(log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannel"])) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannel"] != nil'
               - 'set(log.attributes["unifi.previous_uplink.channel_width"], Int(log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannelWidth"])) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannelWidth"] != nil'
               - 'set(log.attributes["unifi.previous_uplink.band"], log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiBand"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiBand"] != nil'
+              # Session summary on disconnect. Left as keywords: UniFi
+              # emits pre-formatted strings ("1h 56m", "4.54 MB").
               - 'set(log.attributes["unifi.session.duration"], log.attributes["cef_kv"]["UNIFIduration"]) where log.attributes["cef_kv"]["UNIFIduration"] != nil'
               - 'set(log.attributes["unifi.session.usage_up"], log.attributes["cef_kv"]["UNIFIusageUp"]) where log.attributes["cef_kv"]["UNIFIusageUp"] != nil'
               - 'set(log.attributes["unifi.session.usage_down"], log.attributes["cef_kv"]["UNIFIusageDown"]) where log.attributes["cef_kv"]["UNIFIusageDown"] != nil'
+              # Audit detail.
               - 'set(log.attributes["unifi.access_method"], log.attributes["cef_kv"]["UNIFIaccessMethod"]) where log.attributes["cef_kv"]["UNIFIaccessMethod"] != nil'
               - 'set(log.attributes["unifi.settings.section"], log.attributes["cef_kv"]["UNIFIsettingsSection"]) where log.attributes["cef_kv"]["UNIFIsettingsSection"] != nil'
               - 'set(log.attributes["unifi.settings.entry"], log.attributes["cef_kv"]["UNIFIsettingsEntry"]) where log.attributes["cef_kv"]["UNIFIsettingsEntry"] != nil'
               - 'set(log.attributes["unifi.settings.changes"], log.attributes["cef_kv"]["UNIFIsettingsChanges"]) where log.attributes["cef_kv"]["UNIFIsettingsChanges"] != nil'
+              # Reporting device (honeypot events name the UDM explicitly).
               - 'set(log.attributes["observer.ip"], log.attributes["cef_kv"]["UNIFIdeviceIp"]) where log.attributes["cef_kv"]["UNIFIdeviceIp"] != nil'
               - 'set(log.attributes["observer.mac"], log.attributes["cef_kv"]["UNIFIdeviceMac"]) where log.attributes["cef_kv"]["UNIFIdeviceMac"] != nil'
               - 'set(log.attributes["unifi.device.model"], log.attributes["cef_kv"]["UNIFIdeviceModel"]) where log.attributes["cef_kv"]["UNIFIdeviceModel"] != nil'
               - 'set(log.attributes["unifi.device.version"], log.attributes["cef_kv"]["UNIFIdeviceVersion"]) where log.attributes["cef_kv"]["UNIFIdeviceVersion"] != nil'
+      # ── Device system log → ECS ───────────────────────────────────────
+      # Enabling device activity logging on the UDM does not produce more CEF
+      # activity events — it forwards each device's raw Linux system log as
+      # ordinary RFC3164 syslog. Order 10k–20k records/day on a small site,
+      # but measure your own: size it by ingest time, not by the record
+      # timestamp — see the syslog-ng replay warning in the README.
+      #
+      # Runs after transform/unifi_ecs so the non-CEF fallback has already
+      # stamped the envelope fields, and before transform/strip_working_fields
+      # because everything here reads `message`.
+      #
+      # Every statement group is scoped to cef_kv == nil. A CEF record must
+      # never reach these rules: "CEF:0|Ubiquiti|..." would otherwise parse as
+      # a process tag.
       transform/device_syslog:
         error_mode: ignore
         log_statements:
+          # ---- 1. split the frame, then recover the process tag -----------
+          # Two separate jobs, deliberately kept apart. Do not re-merge them:
+          # that merge WAS the bug in issue #24.
+          #
+          #   1a  ALWAYS set dev_msg, on every device frame. Section 2 keys
+          #       off dev_msg to move the raw frame into event.original and
+          #       the human-readable half into body, and sections 3-5 all
+          #       match on body. Leave dev_msg unset and body still holds the
+          #       whole frame — PRI, timestamp, hostname and tag included — so
+          #       every downstream pattern matches the wrong string. Nothing
+          #       raises and nothing lands in the failure pipeline; the fields
+          #       are just silently absent.
+          #
+          #   1b  Recover process.name ONLY where the syslog parser could not.
+          #       Scoping THIS to process.name == nil is right: the appname
+          #       rule in transform/unifi_ecs is the correct source wherever
+          #       RFC3164 found a tag, and device_syslog must defer to it.
+          #       Scoping 1a to it as well is what broke every device that
+          #       does not double its hostname.
+          #
+          # 1a is a plain copy of `message`, because the syslog parser has
+          # already removed the header and — where it found one — the tag, so
+          # `message` IS the human-readable half. A copy cannot raise, so it
+          # is safe to run unconditionally.
+          #
+          # 1b only has work to do on a frame the parser could NOT split,
+          # which in practice means the UDM's DOUBLED hostname:
+          #   <13>… Gateway Gateway coredns[4155]: {…}
+          # The parser consumes the first hostname, cannot make a tag of the
+          # second (no colon), and leaves "Gateway coredns[4155]: {…}" in
+          # `message`. The LAZY (?:\S+\s+)*? prefix is what absorbs that
+          # repeat. Lazy is NECESSARY — it tries zero repetitions first, so a
+          # tag already sitting at the start of `message` is not swallowed by
+          # a fixed \S+\s+ that would then call the first word of the message
+          # a process — but it was never SUFFICIENT on its own, which is
+          # exactly what 1a is for. No real AP or switch frame has been seen
+          # by this project yet (issue #20); the single-hostname shape is
+          # exercised by synthetic replay only.
+          #
+          # RE2: no lookahead, no backreferences. The condition duplicates the
+          # pattern because a non-matching ExtractPatterns raises, and
+          # error_mode: ignore logs every raise — at this volume that is the
+          # difference between a quiet collector and a noisy one. Keep that
+          # property: never let an ExtractPatterns run on a frame that cannot
+          # match it.
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["message"] != nil'
+            statements:
+              - 'set(log.attributes["dev_msg"], log.attributes["message"])'
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["process.name"] == nil and attributes["message"] != nil and IsMatch(attributes["message"], "^(?:\\S+\\s+)*?[A-Za-z0-9_./-]+(?:\\[[0-9]+\\])?:\\s")'
             statements:
               - 'merge_maps(log.attributes, ExtractPatterns(log.attributes["message"], "^(?:\\S+\\s+)*?(?P<dev_tag>[A-Za-z0-9_./-]+)(?:\\[(?P<dev_pid>[0-9]+)\\])?:\\s+(?P<dev_msg>.*)$"), "upsert")'
-              - 'set(log.attributes["process.executable"], log.attributes["dev_tag"]) where IsMatch(log.attributes["dev_tag"], "^/")'
               - 'set(log.attributes["process.name"], log.attributes["dev_tag"])'
-              - 'replace_pattern(log.attributes["process.name"], "^.*/", "")'
               - 'set(log.attributes["process.pid"], Int(log.attributes["dev_pid"])) where log.attributes["dev_pid"] != nil and log.attributes["dev_pid"] != ""'
+          # ---- 1c. full-path tag → process.executable + basename ---------
+          # unifi-mq-broker logs its tag as a full path. ECS puts the path in
+          # process.executable and the basename in process.name.
+          #
+          # Applied to process.name whatever set it — 1b above OR the appname
+          # rule in transform/unifi_ecs, which reaches the same full path on a
+          # frame RFC3164 could split. Doing this inside 1b only left the two
+          # hostname shapes disagreeing on both fields.
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] != nil and IsMatch(attributes["process.name"], "^/")'
+            statements:
+              - 'set(log.attributes["process.executable"], log.attributes["process.name"])'
+              - 'replace_pattern(log.attributes["process.name"], "^.*/", "")'
+          # ---- 2. body → the message, raw frame → event.original ---------
+          # Non-CEF records used to keep the whole frame in body, which the
+          # comment in the CEF branch called "pure duplication" to avoid. That
+          # reasoning inverts once the header is parsed: PRI, timestamp,
+          # hostname and tag are now all structured fields, so leaving them in
+          # body duplicates them in the one place that IS indexed. Move the
+          # raw frame to event.original (ECS marks it index: false) and keep
+          # only the human-readable half in body.
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["dev_msg"] != nil'
             statements:
               - 'set(log.attributes["event.original"], log.body) where IsString(log.body)'
               - 'set(log.body, log.attributes["dev_msg"])'
+          # ---- 3. coredns → unifi.dns ------------------------------------
+          # The gateway's DNS *block* decision log, already structured JSON.
+          #
+          # Volume is BURSTY and client-driven, so do not size it from one sample:
+          # coredns was half of all device records during a burst of one client
+          # hammering a blocked domain, and under 2% an hour later.
+          #
+          # It is NOT general query logging: every coredns record sampled carried
+          # a "type", split between dnsAdBlock and contentFilteringBlock (with
+          # categories such as CIPA / ANONYMIZERS / UNREACHABLE_DOMAINS). Do not
+          # present this dataset as a record of every lookup — only blocked ones
+          # appear.
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["process.name"] == "coredns" and IsMatch(log.body, "^\\{")'
@@ -413,6 +677,8 @@ opentelemetry-collector:
               - 'set(log.attributes["event.category"], ["network"])'
               - 'set(log.attributes["event.type"], ["connection", "denied"])'
               - 'set(log.attributes["event.outcome"], "success")'
+              # Stable ECS-ish action names; the vendor spelling is kept in
+              # unifi.block_type so a new "type" value is still visible.
               - 'set(log.attributes["unifi.block_type"], log.attributes["dns_kv"]["type"]) where log.attributes["dns_kv"]["type"] != nil'
               - 'set(log.attributes["event.action"], "dns_blocked")'
               - 'set(log.attributes["event.action"], "dns_ad_blocked") where log.attributes["dns_kv"]["type"] == "dnsAdBlock"'
@@ -423,6 +689,10 @@ opentelemetry-collector:
               - 'set(log.attributes["source.ip"], log.attributes["dns_kv"]["ip"]) where log.attributes["source.ip"] == nil and log.attributes["dns_kv"]["ip"] != nil'
               - 'set(log.attributes["source.port"], Int(log.attributes["dns_kv"]["src_port"])) where log.attributes["dns_kv"]["src_port"] != nil'
               - 'set(log.attributes["source.mac"], log.attributes["dns_kv"]["mac"]) where log.attributes["dns_kv"]["mac"] != nil'
+              # dst is the UDM's OWN resolver (127.0.0.1:1053), not the
+              # upstream nameserver. It is the correct ECS destination for a
+              # DNS transaction, but it is deliberately kept out of related.ip
+              # below — a loopback address in the pivot field is pure noise.
               - 'set(log.attributes["destination.ip"], log.attributes["dns_kv"]["dst_ip"]) where log.attributes["dns_kv"]["dst_ip"] != nil'
               - 'set(log.attributes["destination.port"], Int(log.attributes["dns_kv"]["dst_port"])) where log.attributes["dns_kv"]["dst_port"] != nil'
               - 'set(log.attributes["network.transport"], ConvertCase(log.attributes["dns_kv"]["protocol"], "lower")) where log.attributes["dns_kv"]["protocol"] != nil'
@@ -431,8 +701,27 @@ opentelemetry-collector:
               - 'set(log.attributes["destination.address"], log.attributes["destination.ip"]) where log.attributes["destination.ip"] != nil'
               - 'set(log.attributes["related.ip"], [log.attributes["source.ip"]]) where log.attributes["source.ip"] != nil'
               - 'set(log.attributes["related.hosts"], [log.attributes["dns.question.name"]]) where log.attributes["dns.question.name"] != nil'
+              # The syslog header is local time truncated to the second; the
+              # payload carries epoch milliseconds. Set time_unix_nano from it
+              # directly — the sibling "timestamp" field is RFC3339 with a
+              # numeric offset, and OTTL's Time() ctime formats do not have a
+              # colon-separated %z.
               - 'set(log.time_unix_nano, Int(log.attributes["dns_kv"]["unix_milli_timestamp"]) * 1000000) where log.attributes["dns_kv"]["unix_milli_timestamp"] != nil'
+              # body is the JSON blob, now fully mapped. Replace it with a
+              # readable line rather than indexing the payload twice.
               - 'set(log.body, Concat(["blocked DNS query for ", log.attributes["dns.question.name"], " (", log.attributes["rule.category"], ")"], "")) where log.attributes["dns.question.name"] != nil and log.attributes["rule.category"] != nil'
+          # ---- 4. dnsmasq-dhcp → unifi.dhcp ------------------------------
+          # MAC → IP → hostname → bridge, which is the join key for every
+          # other dataset. Five shapes observed:
+          #   DHCPDISCOVER(br0) <mac>                  — no IP yet
+          #   DHCPOFFER(br0) <ip> <mac>
+          #   DHCPREQUEST(br3) <ip> <mac>
+          #   DHCPACK(br3) <ip> <mac> <hostname>       — hostname optional
+          #   Updating leases :: age=…                 — housekeeping
+          # The IP is optional in the pattern because DHCPDISCOVER carries the
+          # MAC in the position the others use for the address. "Updating
+          # leases" does not match and is left to fall through to unifi.system,
+          # which is where that housekeeping line belongs.
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["process.name"] == "dnsmasq-dhcp" and IsMatch(log.body, "^DHCP[A-Z]+\\([^)]+\\)\\s")'
@@ -443,16 +732,40 @@ opentelemetry-collector:
               - 'set(log.attributes["event.type"], ["protocol"])'
               - 'set(log.attributes["network.protocol"], "dhcp")'
               - 'set(log.attributes["network.transport"], "udp")'
+              # DHCPACK → dhcp_ack.
               - 'set(log.attributes["event.action"], log.attributes["dhcp_type"])'
               - 'replace_pattern(log.attributes["event.action"], "^DHCP", "dhcp_")'
               - 'set(log.attributes["event.action"], ConvertCase(log.attributes["event.action"], "lower"))'
               - 'set(log.attributes["source.mac"], log.attributes["dhcp_mac"]) where log.attributes["dhcp_mac"] != nil and log.attributes["dhcp_mac"] != ""'
               - 'set(log.attributes["source.ip"], log.attributes["dhcp_ip"]) where log.attributes["dhcp_ip"] != nil and log.attributes["dhcp_ip"] != ""'
               - 'set(log.attributes["source.address"], log.attributes["source.ip"]) where log.attributes["source.ip"] != nil'
+              # The client-supplied hostname. ECS source.domain explicitly
+              # allows a bare host name, and it is where the CEF branch already
+              # puts UNIFIsrcClientHostname, so the two datasets pivot together.
               - 'set(log.attributes["source.domain"], log.attributes["dhcp_host"]) where log.attributes["dhcp_host"] != nil and log.attributes["dhcp_host"] != ""'
+              # br0/br3 is an interface, not an operator-assigned network name,
+              # so it is NOT network.name — that field carries UNIFInetworkName
+              # on the CEF side and mixing the two would break it.
               - 'set(log.attributes["observer.ingress.interface.name"], log.attributes["dhcp_iface"]) where log.attributes["dhcp_iface"] != nil and log.attributes["dhcp_iface"] != ""'
               - 'set(log.attributes["related.ip"], [log.attributes["source.ip"]]) where log.attributes["source.ip"] != nil'
               - 'set(log.attributes["related.hosts"], [log.attributes["source.domain"]]) where log.attributes["source.domain"] != nil'
+          # ---- 5. sudo → unifi.sudo --------------------------------------
+          # Privileged execution on the gateway, otherwise invisible.
+          #
+          # event.kind stays "event" — NOT alert. Essentially every sudo call
+          # is UniFi's own service agents firing on a timer, so an
+          # unconditional alert would be pure noise. Do not size this from a
+          # short sample: a one-hour window showed a single command and a
+          # single account, and measured over days it is an order of magnitude
+          # more, across ~10 commands and several vendor service accounts
+          # (uid, ucs-update, unifi-user-assets, unifi-access, root).
+          # Detection belongs in a rule in your SIEM over this dataset, where
+          # it can be tuned without a collector redeploy.
+          #
+          # The dataset is assigned on process.name alone, before the field
+          # regex runs, so sudo's FAILURE lines ("user NOT in sudoers", "3
+          # incorrect password attempts") — which do not match the COMMAND
+          # shape — still land here rather than being buried in unifi.system.
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["process.name"] == "sudo"'
@@ -461,29 +774,77 @@ opentelemetry-collector:
               - 'set(log.attributes["event.category"], ["process"])'
               - 'set(log.attributes["event.type"], ["start"])'
               - 'set(log.attributes["event.action"], "sudo_command")'
+              # The middle (?:.*?;\s*)? is what makes this cover more than the
+              # one shape the UDM currently emits. UniFi's uid-agent logs
+              #   uid : PWD=… ; USER=… ; COMMAND=…
+              # but stock sudo puts a TTY= clause there on an interactive call
+              # and an "N incorrect password attempts ;" clause on a failure —
+              # and the failure is the line worth having a username on. Lazy,
+              # so the common no-middle case still matches at zero cost.
               - 'merge_maps(log.attributes, ExtractPatterns(log.body, "^\\s*(?P<sudo_user>\\S+)\\s+:\\s+(?:.*?;\\s*)?PWD=(?P<sudo_pwd>\\S+)\\s*;\\s*USER=(?P<sudo_target>\\S+)\\s*;\\s*COMMAND=(?P<sudo_cmd>.*)$"), "upsert") where IsMatch(log.body, "^\\s*\\S+\\s+:\\s+(?:.*?;\\s*)?PWD=\\S+\\s*;\\s*USER=\\S+\\s*;\\s*COMMAND=")'
               - 'set(log.attributes["user.name"], log.attributes["sudo_user"]) where log.attributes["sudo_user"] != nil'
               - 'set(log.attributes["user.effective.name"], log.attributes["sudo_target"]) where log.attributes["sudo_target"] != nil'
               - 'set(log.attributes["process.working_directory"], log.attributes["sudo_pwd"]) where log.attributes["sudo_pwd"] != nil'
               - 'set(log.attributes["process.command_line"], log.attributes["sudo_cmd"]) where log.attributes["sudo_cmd"] != nil'
               - 'set(log.attributes["related.user"], [log.attributes["sudo_user"], log.attributes["sudo_target"]]) where log.attributes["sudo_user"] != nil and log.attributes["sudo_target"] != nil'
+              # Outcome, so a rule can alert on failure without re-parsing the
+              # body. A sudo line carrying COMMAND= and no failure phrase is by
+              # definition an authorised call — sudo only logs the command line
+              # once it has decided to run it. Failure is tested first and
+              # success only fills a still-empty outcome, because the
+              # "N incorrect password attempts" line carries a COMMAND= too.
               - 'set(log.attributes["event.outcome"], "failure") where IsMatch(log.body, "incorrect password attempts|NOT in the sudoers|authentication failure|user NOT authorized|command not allowed")'
               - 'set(log.attributes["event.action"], "sudo_auth_failure") where log.attributes["event.outcome"] == "failure"'
               - 'set(log.attributes["event.outcome"], "success") where log.attributes["event.outcome"] == nil and log.attributes["sudo_cmd"] != nil'
+              # pam_unix lines name the account in "user=<name>" instead, and
+              # carry no COMMAND= for the regex above to anchor on.
               - 'merge_maps(log.attributes, ExtractPatterns(log.body, "\\suser=(?P<sudo_pam_user>\\S+)\\s*$"), "upsert") where log.attributes["user.name"] == nil and IsMatch(log.body, "\\suser=\\S+\\s*$")'
               - 'set(log.attributes["user.name"], log.attributes["sudo_pam_user"]) where log.attributes["sudo_pam_user"] != nil'
               - 'set(log.attributes["related.user"], [log.attributes["sudo_pam_user"]]) where log.attributes["related.user"] == nil and log.attributes["sudo_pam_user"] != nil'
+          # ---- 6. everything else → unifi.system -------------------------
+          # systemd, mcad, dbus-daemon, ubios-udapi-server, ulogd, earlyoom and
+          # the unifi-mq-broker error spam: gateway OS chatter, roughly half of
+          # all device records. Kept rather than dropped at the collector, and
+          # given its own dataset so it can carry a shorter retention than the
+          # security datasets if your backend supports that.
+          #
+          # "Parsed" here means the syslog envelope plus process.name/pid and a
+          # body with the header removed; severity is already set from the PRI
+          # by the receiver. The per-daemon internal formats (ustate's logfmt,
+          # ubnt_ai_daemon's "<I>:", ubnt-idsips-daemon's tab-separated level)
+          # are NOT parsed yet — see issues #15, #16 and #17.
+          #
+          # No record is left on unifi.syslog: this is the terminal assignment
+          # for the non-CEF branch, so every device record lands in exactly one
+          # of unifi.dns / unifi.dhcp / unifi.sudo / unifi.system.
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["event.dataset"] == "unifi.syslog"'
             statements:
               - 'set(log.attributes["event.dataset"], "unifi.system")'
+      # There is deliberately no webhook_ecs processor — see the note in
+      # 10-receivers-logs.yaml and issue #21.
+
+      # Drops the parsing working set once mapping is done. The raw frame
+      # survives in event.original, so nothing is actually lost — every
+      # remaining attribute is a schema field.
       transform/strip_working_fields:
         error_mode: ignore
         log_statements:
           - context: log
             statements:
               - 'delete_matching_keys(log.attributes, "^(cef_|dev_|dns_kv$|dhcp_|sudo_|hostname$|appname$|facility$|facility_text$|priority$|message$|version$|proc_id$|msg_id$|structured_data$)")'
+      # Tags records that failed a parsing stage; routing/parse_failures
+      # diverts anything tagged into its own pipeline for review. Failure
+      # shapes, most-specific last so the tag reflects the deepest stage
+      # reached:
+      #   syslog_header  — the syslog parser produced no message attribute
+      #   cef_envelope   — message looks like CEF but the envelope regex
+      #                    extracted nothing (cef_name missing)
+      #   cef_extensions — envelope parsed but the extension string did not
+      #                    split into a map
+      #   ecs_mapping    — parsed fine but came out with no event.dataset,
+      #                    i.e. it fell through the taxonomy
       transform/tag_parse_failures:
         error_mode: ignore
         log_statements:
@@ -492,15 +853,24 @@ opentelemetry-collector:
               - 'set(log.attributes["unifi.parse_failure"], "syslog_header") where log.attributes["message"] == nil'
               - 'set(log.attributes["unifi.parse_failure"], "cef_envelope") where log.attributes["message"] != nil and IsMatch(log.attributes["message"], "CEF:\\d+\\|") and log.attributes["cef_name"] == nil'
               - 'set(log.attributes["unifi.parse_failure"], "cef_extensions") where log.attributes["cef_extensions"] != nil and log.attributes["cef_kv"] == nil'
+      # Second failure gate, after ECS mapping: a CEF record that reached
+      # this point without an event.dataset means the taxonomy has a hole.
       transform/tag_mapping_failures:
         error_mode: ignore
         log_statements:
           - context: log
             statements:
               - 'set(log.attributes["unifi.parse_failure"], "ecs_mapping") where log.attributes["cef_kv"] != nil and log.attributes["event.dataset"] == nil'
+      # A zero timestamp is rejected outright by some backends and silently
+      # mis-bucketed by others. Any frame that skipped syslog parsing arrives
+      # that way, so fall back to the time the collector saw it rather than
+      # losing the record.
       transform/timestamp_guard:
         log_statements:
           - set(log.time_unix_nano, log.observed_time_unix_nano) where log.time_unix_nano == 0
+      # Identity of the emitting pipeline. service.name is deliberately
+      # hardcoded rather than parameterised — downstream routing keys off it,
+      # and it names this collector, not the site.
       resource/unifi:
         attributes:
           - key: service.name
@@ -509,32 +879,79 @@ opentelemetry-collector:
           - key: observed.source
             value: unifi-otel
             action: upsert
+      # NOTE: backend-specific index/stream routing is deliberately absent.
+      # This config exports OTLP and nothing else; where the data lands is a
+      # property of your gateway or backend, not of the parsing. See the
+      # destinations documentation for per-backend recipes.
       batch:
         send_batch_size: 1024
         timeout: 5s
     extensions:
+      # Probed as a liveness/readiness endpoint by whatever runs the
+      # collector — see the deployment docs for your platform.
       health_check:
         endpoint: 0.0.0.0:13133
     exporters:
+      # `otlp_grpc`, not `otlp` — the bare `otlp` alias is deprecated as of
+      # collector 0.157.0 and logs a warning on every start.
+      #
+      # This is the only exporter, deliberately. Point it at your own
+      # collector, gateway or backend's OTLP endpoint; destinations are
+      # documented rather than shipped as config.
       otlp_grpc/gateway:
         endpoint: ${env:OTLP_GATEWAY_ENDPOINT:-otel-gateway.observability.svc.cluster.local:4317}
         tls:
           insecure: true
+      # Failure records are also printed to the collector's own log in full,
+      # so the container log shows what failed without a round-trip to your
+      # backend. detailed verbosity is deliberate: failures should be rare,
+      # and the whole point is seeing the raw frame and attributes.
       debug/parse_failures:
         verbosity: detailed
     connectors:
+      # Splits syslog records by parse outcome: tagged records go to the
+      # failure pipeline, everything else continues to the normal export
+      # path.
       routing/parse_failures:
         default_pipelines: [logs/unifi_syslog_export]
         table:
           - context: log
             condition: 'log.attributes["unifi.parse_failure"] != nil'
             pipelines: [logs/unifi_parse_failures]
+    # The default config set is logs only. It is assembled from repeated
+    # --config flags — the collector has no glob or directory mode, so an
+    # unlisted file is silently ignored rather than an error, which makes
+    # this list the entire configuration surface:
+    #
+    #   --config=/conf/10-receivers-logs.yaml
+    #   --config=/conf/20-processors-logs.yaml
+    #   --config=/conf/40-exporters.yaml
+    #   --config=/conf/90-service.yaml
+    #
+    # SNMP polling is an opt-in module and is NOT in that list. To add it,
+    # append its three files to the flags above — nothing here changes:
+    #
+    #   --config=/conf/optional/snmp/15-receivers-snmp.yaml
+    #   --config=/conf/optional/snmp/30-processors-metrics.yaml
+    #   --config=/conf/optional/snmp/91-service-metrics.yaml
+    #
+    # That last file merges a metrics/unifi_snmp pipeline into the `service`
+    # block below. See docs/snmp.md — it needs SNMPv3 credentials, reaches
+    # the console only, and is not covered by CI.
     service:
       extensions: [health_check]
       telemetry:
         logs:
           level: info
       pipelines:
+        # Syslog splits by parse outcome at routing/parse_failures; the
+        # export and failure pipelines below receive from the connector.
+        # Note tag_parse_failures runs BEFORE strip_working_fields, since
+        # it inspects the cef_* working attributes.
+        #
+        # device_syslog sits between unifi_ecs and strip_working_fields: it
+        # needs the non-CEF fallback to have run (it refines event.dataset off
+        # unifi.syslog) and it reads `message`, which strip removes.
         logs/unifi_syslog:
           receivers: [syslog/unifi_udp, syslog/unifi_tcp]
           processors:
@@ -553,6 +970,10 @@ opentelemetry-collector:
             - resource/unifi
             - batch
           exporters: [otlp_grpc/gateway]
+        # Records that failed to parse take the same export path, but are
+        # also printed in full by the debug exporter. They carry
+        # unifi.parse_failure with the stage that failed, so route or filter
+        # them downstream on that attribute if you want them separated.
         logs/unifi_parse_failures:
           receivers: [routing/parse_failures]
           processors:
@@ -560,3 +981,10 @@ opentelemetry-collector:
             - resource/unifi
             - batch
           exporters: [otlp_grpc/gateway, debug/parse_failures]
+    # There is deliberately no webhook receiver. The UDM emitted an Alarm
+    # Manager webhook AND a SIEM Server syslog record for every alarm, with
+    # identical timestamps and identical text, and syslog is the superset —
+    # it carries every SIEM event, not just the ones Alarm Manager was
+    # configured to forward. See the README for what that gives up (UniFi
+    # Protect and Access alarms, which the Network SIEM feed does not
+    # carry) and issue #21 if you have that hardware to test against.
