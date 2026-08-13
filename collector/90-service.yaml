@@ -1,3 +1,23 @@
+# The default config set is logs only. It is assembled from repeated
+# --config flags — the collector has no glob or directory mode, so an
+# unlisted file is silently ignored rather than an error, which makes
+# this list the entire configuration surface:
+#
+#   --config=/conf/10-receivers-logs.yaml
+#   --config=/conf/20-processors-logs.yaml
+#   --config=/conf/40-exporters.yaml
+#   --config=/conf/90-service.yaml
+#
+# SNMP polling is an opt-in module and is NOT in that list. To add it,
+# append its three files to the flags above — nothing here changes:
+#
+#   --config=/conf/optional/snmp/15-receivers-snmp.yaml
+#   --config=/conf/optional/snmp/30-processors-metrics.yaml
+#   --config=/conf/optional/snmp/91-service-metrics.yaml
+#
+# That last file merges a metrics/unifi_snmp pipeline into the `service`
+# block below. See docs/snmp.md — it needs SNMPv3 credentials, reaches
+# the console only, and is not covered by CI.
 service:
   extensions: [health_check]
   telemetry:
@@ -43,23 +63,3 @@ service:
         - resource/unifi
         - batch
       exporters: [otlp_grpc/gateway, debug/parse_failures]
-
-    # Both SNMP receivers share one pipeline — they differ only in poll
-    # interval and which counters they carry, so the shaping is identical.
-    #
-    # Order matters: units are normalised first, then the memory ratio is
-    # derived from the normalised gauges and inverted, and cumulative CPU
-    # ticks become deltas last so nothing downstream sees a mixed
-    # temporality.
-    metrics/unifi_snmp:
-      receivers: [snmp/unifi, snmp/unifi_slow]
-      processors:
-        - memory_limiter
-        - filter/dead_interfaces
-        - transform/snmp_units
-        - metricsgeneration/memory_utilization
-        - transform/memory_utilization_invert
-        - cumulative_to_delta/cpu
-        - resource/unifi
-        - batch
-      exporters: [otlp_grpc/gateway]

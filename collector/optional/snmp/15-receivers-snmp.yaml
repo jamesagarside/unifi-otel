@@ -1,3 +1,22 @@
+# ─────────────────────────────────────────────────────────────────────
+# OPTIONAL MODULE — SNMP polling. NOT part of the default config set.
+#
+# The collector has no glob or directory mode, so the set of --config
+# flags is the whole configuration surface: a file nobody lists is
+# silently ignored. Nothing under collector/*.yaml references this file,
+# so SNMP is off unless you append all three flags of this module to the
+# default set:
+#
+#   --config=/conf/optional/snmp/15-receivers-snmp.yaml
+#   --config=/conf/optional/snmp/30-processors-metrics.yaml
+#   --config=/conf/optional/snmp/91-service-metrics.yaml
+#
+# Requires UNIFI_SNMP_USER and UNIFI_SNMP_PASSWORD in the environment;
+# UNIFI_HOST selects the console to poll. See docs/snmp.md.
+#
+# YAML anchors do not cross --config files, so every anchor this module
+# uses is defined and consumed within this one file.
+# ─────────────────────────────────────────────────────────────────────
 receivers:
   # ── SNMP ────────────────────────────────────────────────────────────
   # Poll-only; snmpreceiver has no trap support and no MIB support, so

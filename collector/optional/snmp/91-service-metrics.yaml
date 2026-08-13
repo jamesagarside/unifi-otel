@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────
+# OPTIONAL MODULE — service fragment. NOT part of the default config set.
+#
+# `service.pipelines` deep-merges across --config files, so this adds one
+# metrics pipeline to the service block defined in 90-service.yaml
+# without restating extensions, telemetry or any log pipeline. Pass it
+# after 90-service.yaml. Verified against collector 0.157.0.
+#
+# The referenced processors come from two places: memory_limiter,
+# resource/unifi and batch are in the default set's
+# 20-processors-logs.yaml; the rest are in 30-processors-metrics.yaml
+# alongside this file. So this module is only ever passed IN ADDITION to
+# the default flags, never instead of them.
+# ─────────────────────────────────────────────────────────────────────
+service:
+  pipelines:
+    # Both SNMP receivers share one pipeline — they differ only in poll
+    # interval and which counters they carry, so the shaping is identical.
+    #
+    # Order matters: units are normalised first, then the memory ratio is
+    # derived from the normalised gauges and inverted, and cumulative CPU
+    # ticks become deltas last so nothing downstream sees a mixed
+    # temporality.
+    metrics/unifi_snmp:
+      receivers: [snmp/unifi, snmp/unifi_slow]
+      processors:
+        - memory_limiter
+        - filter/dead_interfaces
+        - transform/snmp_units
+        - metricsgeneration/memory_utilization
+        - transform/memory_utilization_invert
+        - cumulative_to_delta/cpu
+        - resource/unifi
+        - batch
+      exporters: [otlp_grpc/gateway]

@@ -1,3 +1,14 @@
+# ─────────────────────────────────────────────────────────────────────
+# OPTIONAL MODULE — SNMP metric shaping. NOT part of the default config
+# set. Only referenced by metrics/unifi_snmp in 91-service-metrics.yaml;
+# see 15-receivers-snmp.yaml for the opt-in --config flags and
+# docs/snmp.md for the UniFi-side setup.
+#
+# memory_limiter, resource/unifi and batch are NOT redefined here — the
+# metrics pipeline reuses the ones from the default set's
+# 20-processors-logs.yaml, so this module is additive on top of the
+# default flags rather than a replacement for them.
+# ─────────────────────────────────────────────────────────────────────
 processors:
   # The UDM-SE reports 68 interfaces, most of them kernel tunnel stubs
   # that are permanently down and always read zero. Dropping them here
