@@ -1,0 +1,45 @@
+# SYNTHETIC. Gateway OS chatter and the tag-shape edge cases -> unifi-system.
+#
+# MATCHED-PAIR FILE: doubled-hostname frame first, single-hostname
+# byte-identical payload second.
+#
+# 1. A FULL-PATH TAG. unifi-mq-broker logs its tag as a path, so
+#    process executable takes the path and process name the basename.
+#    Section 1c has to fire on both hostname shapes -- on the doubled one
+#    process name came from the device_syslog regex, on the single one
+#    from the RFC3164 appname.
+<27>Aug 13 09:19:01 host-0a3 host-0a3 /usr/bin/unifi-mq-broker[1522]: error: failed to connect to broker at 127.0.0.1:1883
+<27>Aug 13 09:19:01 host-0a3 /usr/bin/unifi-mq-broker[1522]: error: failed to connect to broker at 127.0.0.1:1883
+# 2. A TAG WITH NO [pid] -- the optional (?:\[(?P<dev_pid>[0-9]+)\])? branch.
+<30>Aug 13 09:19:02 host-0a3 host-0a3 mcad: cannot open /proc/net/dev_snmp6, ignoring
+<30>Aug 13 09:19:02 host-0a3 mcad: cannot open /proc/net/dev_snmp6, ignoring
+# 3. NO TAG AT ALL. Must fall through to unifi-system without the tag
+#    regex raising. NOTE the two members legitimately differ in `body`:
+#    with no tag there is nothing to tell a repeated hostname apart from
+#    the first word of the message, so the doubled frame keeps the extra
+#    hostname in body. Dataset, key set and severity still match.
+<30>Aug 13 09:19:03 host-0a3 host-0a3 last message repeated 3 times
+<30>Aug 13 09:19:03 host-0a3 last message repeated 3 times
+# 4. systemd, the single most common shape on the box.
+<30>Aug 13 09:19:04 host-0a3 host-0a3 systemd[1]: Started ubios-udapi-server.service.
+<30>Aug 13 09:19:04 host-0a3 systemd[1]: Started ubios-udapi-server.service.
+# 5. A COLON INSIDE THE MESSAGE. The lazy (?:\S+\s+)*? prefix must stop at
+#    the real tag and not walk forward to the colon in "warning:".
+<27>Aug 13 09:19:05 host-0a3 host-0a3 ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying
+<27>Aug 13 09:19:05 host-0a3 ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying
+# 6. SWITCH-SHAPED kernel frame. UNVERIFIED: no real switch frame has
+#    ever reached this project (issue #20), and a switch that doubles its
+#    hostname is a guess on top of that guess. Kept as a regression
+#    fixture, not as evidence that switch support works.
+<4>Aug 13 09:19:06 host-2f8b host-2f8b kernel: [12345.678901] br0: port 3(eth4) entered blocking state
+<4>Aug 13 09:19:06 host-2f8b kernel: [12345.678901] br0: port 3(eth4) entered blocking state
+# 7. AP-SHAPED hostapd frame. Same caveat as 6. The payload itself
+#    contains two further colons, which the tag regex must not mistake
+#    for the tag terminator.
+<30>Aug 13 09:19:07 host-6c1d host-6c1d hostapd: ath0: STA 00:00:5E:00:53:31 IEEE 802.11: associated
+<30>Aug 13 09:19:07 host-6c1d hostapd: ath0: STA 00:00:5E:00:53:31 IEEE 802.11: associated
+# 8. NO PRI HEADER. allow_skip_pri_header lets the RFC3164 parser take
+#    the frame anyway; the record comes out with no log-syslog fields
+#    and an unspecified severity rather than being dropped.
+Aug 13 09:19:08 host-0a3 host-0a3 systemd[1]: Reloaded ubios-udapi-server.service.
+Aug 13 09:19:08 host-0a3 systemd[1]: Reloaded ubios-udapi-server.service.

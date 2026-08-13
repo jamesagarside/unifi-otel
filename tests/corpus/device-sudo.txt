@@ -1,0 +1,24 @@
+# SYNTHETIC. Privileged execution -> unifi-sudo.
+#
+# MATCHED-PAIR FILE: doubled-hostname frame first, single-hostname
+# byte-identical payload second. The sudo pair is the nastiest case in
+# issue #24: the dataset is assigned on process name alone, so a broken
+# single-hostname frame still landed in unifi-sudo and looked healthy in
+# a dataset histogram while carrying no actor at all.
+#
+# 1. UniFi's own uid agent. No TTY clause; the username is space-padded
+#    by sudo itself, which the leading \s* in the pattern absorbs.
+<86>Aug 13 09:18:01 host-0a3 host-0a3 sudo[3312]:      uid : PWD=/ ; USER=root ; COMMAND=/usr/bin/ubnt-device-info summary
+<86>Aug 13 09:18:01 host-0a3 sudo[3312]:      uid : PWD=/ ; USER=root ; COMMAND=/usr/bin/ubnt-device-info summary
+# 2. An interactive call, which puts a TTY= clause in the middle. That is
+#    what the lazy (?:.*?;\s*)? group exists for.
+<86>Aug 13 09:18:02 host-0a3 host-0a3 sudo[3313]: user-5b2a : TTY=pts/0 ; PWD=/home/user-5b2a ; USER=root ; COMMAND=/usr/bin/systemctl restart ubios-udapi-server.service
+<86>Aug 13 09:18:02 host-0a3 sudo[3313]: user-5b2a : TTY=pts/0 ; PWD=/home/user-5b2a ; USER=root ; COMMAND=/usr/bin/systemctl restart ubios-udapi-server.service
+# 3. A failure that still carries COMMAND=, which is why event outcome
+#    tests for failure BEFORE filling in success.
+<86>Aug 13 09:18:03 host-0a3 host-0a3 sudo[3314]: user-5b2a : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/user-5b2a ; USER=root ; COMMAND=/usr/bin/systemctl restart ubios-udapi-server.service
+<86>Aug 13 09:18:03 host-0a3 sudo[3314]: user-5b2a : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/user-5b2a ; USER=root ; COMMAND=/usr/bin/systemctl restart ubios-udapi-server.service
+# 4. pam_unix, which names the account in a trailing "user=" and carries
+#    no COMMAND= for the main pattern to anchor on.
+<86>Aug 13 09:18:04 host-0a3 host-0a3 sudo[3315]: pam_unix(sudo:auth): authentication failure; logname= uid=0 euid=0 tty=/dev/pts/0 ruser= rhost=  user=user-5b2a
+<86>Aug 13 09:18:04 host-0a3 sudo[3315]: pam_unix(sudo:auth): authentication failure; logname= uid=0 euid=0 tty=/dev/pts/0 ruser= rhost=  user=user-5b2a

@@ -1,0 +1,20 @@
+# SYNTHETIC. coredns block-decision logs -> unifi-dns.
+#
+# MATCHED-PAIR FILE. Frames come in adjacent pairs: the DOUBLED-hostname
+# frame first, then the byte-identical payload with a SINGLE hostname.
+# Only the hostname repetition differs -- same PRI, same timestamp, same
+# payload. That pairing is the regression test for issue #24, where
+# parsing silently degraded on every device that does not double.
+#
+# dnsAdBlock.
+<30>Aug 13 09:16:01 host-0a3 host-0a3 coredns[4155]: {"type":"dnsAdBlock","category":"ADVERTISING","domain":"ads.tracking.example.com","src_ip":"198.51.100.24","src_port":51514,"dst_ip":"127.0.0.1","dst_port":1053,"protocol":"udp","mac":"00:00:5E:00:53:11","unix_milli_timestamp":1786608961123,"timestamp":"2026-08-13T09:16:01.123+01:00"}
+<30>Aug 13 09:16:01 host-0a3 coredns[4155]: {"type":"dnsAdBlock","category":"ADVERTISING","domain":"ads.tracking.example.com","src_ip":"198.51.100.24","src_port":51514,"dst_ip":"127.0.0.1","dst_port":1053,"protocol":"udp","mac":"00:00:5E:00:53:11","unix_milli_timestamp":1786608961123,"timestamp":"2026-08-13T09:16:01.123+01:00"}
+# contentFilteringBlock, which carries a rule category from UniFi's
+# content-filter vocabulary and uses "ip" rather than "src_ip".
+<30>Aug 13 09:16:02 host-0a3 host-0a3 coredns[4155]: {"type":"contentFilteringBlock","category":"ANONYMIZERS","domain":"proxy.example.org","ip":"198.51.100.41","dst_ip":"127.0.0.1","dst_port":1053,"protocol":"tcp","mac":"00:00:5E:00:53:41","unix_milli_timestamp":1786608962456,"timestamp":"2026-08-13T09:16:02.456+01:00"}
+<30>Aug 13 09:16:02 host-0a3 coredns[4155]: {"type":"contentFilteringBlock","category":"ANONYMIZERS","domain":"proxy.example.org","ip":"198.51.100.41","dst_ip":"127.0.0.1","dst_port":1053,"protocol":"tcp","mac":"00:00:5E:00:53:41","unix_milli_timestamp":1786608962456,"timestamp":"2026-08-13T09:16:02.456+01:00"}
+# coredns emitting NON-JSON. Must NOT become unifi-dns -- the body does
+# not start with "{", so section 3 never runs and it falls to
+# unifi-system carrying no DNS question name at all.
+<30>Aug 13 09:16:03 host-0a3 host-0a3 coredns[4155]: [INFO] plugin/reload: Running configuration SHA512 = 1f4b9c2d8e
+<30>Aug 13 09:16:03 host-0a3 coredns[4155]: [INFO] plugin/reload: Running configuration SHA512 = 1f4b9c2d8e

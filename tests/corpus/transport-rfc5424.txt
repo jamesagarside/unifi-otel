@@ -1,0 +1,42 @@
+# SYNTHETIC. The third axis from issue #25: the same payload over
+# RFC3164/UDP and over RFC5424/TCP.
+#
+# MATCHED-PAIR FILE. Frames come in adjacent pairs: the RFC3164 frame
+# first (replayed over UDP to syslog/unifi_udp), the RFC5424 frame second
+# (replayed over TCP to syslog/unifi_tcp). The harness routes each frame
+# by its own syntax -- "<PRI>1 " means RFC5424 -- so the two receivers are
+# both exercised from one file.
+#
+# WHY THIS AXIS EXISTS: RFC5424 has no doubled-hostname pathology, so
+# every RFC5424 frame takes what is effectively the single-hostname path
+# -- the exact path issue #24 showed was silently degraded. It was never
+# replayed before.
+#
+# HONESTY NOTE: no real non-CEF RFC5424 device frame has ever been seen by
+# this project. UniFi's SIEM Server emits RFC5424 over TCP, but every
+# frame observed on that path has been CEF. Whether UniFi emits non-CEF
+# device syslog over 5424 at all is an OPEN QUESTION (#25). Pairs 1-4
+# below are therefore inventions testing a receiver, not a record of
+# vendor behaviour.
+#
+# 1. coredns JSON.
+<30>Aug 13 09:22:01 host-0a3 coredns[4155]: {"type":"dnsAdBlock","category":"ADVERTISING","domain":"ads.tracking.example.com","src_ip":"198.51.100.24","src_port":51514,"dst_ip":"127.0.0.1","dst_port":1053,"protocol":"udp","mac":"00:00:5E:00:53:11","unix_milli_timestamp":1786609321123,"timestamp":"2026-08-13T09:22:01.123+01:00"}
+<30>1 2026-08-13T09:22:01.123000+01:00 host-0a3 coredns 4155 - - {"type":"dnsAdBlock","category":"ADVERTISING","domain":"ads.tracking.example.com","src_ip":"198.51.100.24","src_port":51514,"dst_ip":"127.0.0.1","dst_port":1053,"protocol":"udp","mac":"00:00:5E:00:53:11","unix_milli_timestamp":1786609321123,"timestamp":"2026-08-13T09:22:01.123+01:00"}
+# 2. dnsmasq-dhcp.
+<30>Aug 13 09:22:02 host-0a3 dnsmasq-dhcp[2211]: DHCPACK(br3) 198.51.100.33 00:00:5E:00:53:23 host-9b41
+<30>1 2026-08-13T09:22:02.000000+01:00 host-0a3 dnsmasq-dhcp 2211 - - DHCPACK(br3) 198.51.100.33 00:00:5E:00:53:23 host-9b41
+# 3. sudo.
+<86>Aug 13 09:22:03 host-0a3 sudo[3312]:      uid : PWD=/ ; USER=root ; COMMAND=/usr/bin/ubnt-device-info summary
+<86>1 2026-08-13T09:22:03.000000+01:00 host-0a3 sudo 3312 - -      uid : PWD=/ ; USER=root ; COMMAND=/usr/bin/ubnt-device-info summary
+# 4. systemd, with RFC5424 STRUCTURED-DATA and a MSGID. Both are parsed
+#    into working attributes and both must be gone by export --
+#    transform/strip_working_fields names structured_data and msg_id
+#    explicitly, and nothing else in the config would remove them.
+<30>Aug 13 09:22:04 host-0a3 systemd[1]: Started ubios-udapi-server.service.
+<30>1 2026-08-13T09:22:04.000000+01:00 host-0a3 systemd 1 ID47 [exampleSDID@32473 iut="3" eventSource="host-0a3"] Started ubios-udapi-server.service.
+# 5. CEF. This is the ONE pair on this axis with a real-world basis: the
+#    SIEM Server does emit CEF over RFC5424/TCP, and the CEF path is
+#    separately asserted byte-identical with and without the device
+#    transform (bar 4).
+<14>Aug 13 09:22:05 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|544|Network Accessed|1|UNIFIhost=site-a1b UNIFIcategory=Audit UNIFIadmin=user-3c8f@example.org src=203.0.113.61 UNIFIaccessMethod=Local UNIFIutcTime=2026-08-13T08:22:05.000Z msg=user-3c8f@example.org signed in to UniFi Network from 203.0.113.61
+<14>1 2026-08-13T09:22:05.000000+01:00 host-0a3 CEF - - - CEF:0|Ubiquiti|UniFi Network|9.5.24|544|Network Accessed|1|UNIFIhost=site-a1b UNIFIcategory=Audit UNIFIadmin=user-3c8f@example.org src=203.0.113.61 UNIFIaccessMethod=Local UNIFIutcTime=2026-08-13T08:22:05.000Z msg=user-3c8f@example.org signed in to UniFi Network from 203.0.113.61

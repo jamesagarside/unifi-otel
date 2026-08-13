@@ -1,0 +1,26 @@
+# SYNTHETIC, AND KNOWINGLY WRONG IN SHAPE.
+#
+# This file asserts the CURRENT DOCUMENTED FAILURE of issue #9, described
+# in docs/known-issues.md: linkcheck emits pretty-printed multi-line JSON,
+# each line arrives as its own datagram, and every line after the first
+# lands in the parse-failure pipeline tagged syslog_header.
+#
+# The MECHANISM is what the goldens pin down, and the mechanism was
+# demonstrated. The SHAPE was not: how many lines a real linkcheck frame
+# is, whether any line but the first carries a PRI, and where the frame
+# ends are all unknown to this repository -- which is precisely why #9 is
+# documented rather than fixed. No real linkcheck frame is available.
+#
+# So do NOT read this file as a specification of the payload. Read it as:
+# "a header line plus N header-less continuation lines behaves like this".
+# If someone fixes #9, this golden is expected to change, and the diff is
+# the report of what changed.
+<30>Aug 13 09:21:01 host-0a3 host-0a3 linkcheck[7781]: {
+    "status": "ok",
+    "latency_ms": 12.4,
+    "download_mbps": 412.5,
+    "upload_mbps": 38.2,
+    "isp": "isp-4d92",
+    "server_city": "geo-77af",
+    "server_country": "ZZ"
+}

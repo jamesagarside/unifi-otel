@@ -1,0 +1,13 @@
+# SYNTHETIC. Firewall policy enforcement over the SIEM Server CEF feed.
+# Event code 801 is a live code (see collector/20-processors-logs.yaml);
+# the field values here are invented, the key set and the envelope shape
+# are modelled on what that config reads.
+#
+# CEF frames carry a SINGLE hostname and the RFC3164 parser takes "CEF"
+# as the tag, which is why transform/unifi_ecs excludes appname == "CEF"
+# from process name. Both properties are asserted by the goldens.
+<14>Aug 13 09:15:01 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|801|Blocked by Firewall|5|UNIFIhost=site-a1b UNIFIcategory=Security UNIFIpolicyType=Firewall UNIFIpolicyName=pol-4f2c act=blocked UNIFIsrcClientIp=198.51.100.24 UNIFIsrcClientMac=00:00:5E:00:53:11 UNIFIsrcClientHostname=host-91c4 UNIFIsrcClientAlias=alias-9d17 UNIFIsrcClientModel=U6-Pro UNIFIsrcZone=Internal UNIFIdstZone=External dst=203.0.113.9 dpt=443 spt=51544 proto=TCP app=https UNIFIdirection=outgoing UNIFIdstDomain=tracker.example.net UNIFIdstRegion=ZZ UNIFItotalBytes=4821 UNIFItotalPackets=12 UNIFInetworkName=Default UNIFInetworkVlan=1 deviceInboundInterface=br0 deviceOutboundInterface=eth4 UNIFIflowId=null UNIFIflowCount=3 UNIFIrisk=medium UNIFIutcTime=2026-08-13T08:15:01.482Z msg=Blocked alias-9d17 from accessing tracker.example.net by the pol-4f2c Firewall Policy
+# act=allowed exercises the [connection, allowed] branch of the taxonomy.
+# The allowed side of a firewall policy has NOT been observed live under
+# code 801 -- the code/act combination here is an assumption.
+<14>Aug 13 09:15:02 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|801|Allowed by Firewall|3|UNIFIhost=site-a1b UNIFIcategory=Security UNIFIpolicyType=Firewall UNIFIpolicyName=pol-6b83 act=allowed UNIFIsrcClientIp=198.51.100.25 UNIFIsrcClientMac=00:00:5E:00:53:12 UNIFIsrcZone=Internal UNIFIdstZone=Internet 1 dst=203.0.113.10 dpt=53 spt=40122 proto=UDP app=dns UNIFIdirection=outgoing UNIFItotalBytes=180 UNIFItotalPackets=2 UNIFInetworkName=Default deviceInboundInterface=br0 deviceOutboundInterface=eth4 UNIFIutcTime=2026-08-13T08:15:02.010Z msg=Allowed traffic from 198.51.100.25 to 203.0.113.10 by the pol-6b83 Firewall Policy

@@ -1,0 +1,14 @@
+# SYNTHETIC. Security-category CEF that is NOT policy enforcement, so it
+# takes the event kind: alert branch -- except 203, which the taxonomy
+# excludes by code because live 203s were observed with no
+# UNIFIpolicyType at all.
+#
+# Codes 201, 202 and 203 are live codes named in
+# collector/20-processors-logs.yaml. Field values are invented.
+<132>Aug 13 09:15:10 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|201|Intrusion Attempt Blocked|8|UNIFIhost=site-a1b UNIFIcategory=Security UNIFIpolicyType=IDS/IPS UNIFIpolicyName=Scanning Activity act=blocked UNIFIsrcClientIp=203.0.113.44 src=203.0.113.44 dst=198.51.100.24 dpt=22 spt=61120 proto=TCP UNIFIdirection=incoming UNIFIdstRegion=ZZ UNIFIrisk=high UNIFIdeviceIp=198.51.100.1 UNIFIdeviceMac=00:00:5E:00:53:01 UNIFIdeviceModel=UDMPRO UNIFIdeviceVersion=4.3.10.1 UNIFIutcTime=2026-08-13T08:15:10.774Z msg=A network intrusion attempt has been detected and blocked from 203.0.113.44
+# 202 keeps event type [info] rather than [connection, denied], even
+# though act=blocked would otherwise set the latter.
+<132>Aug 13 09:15:11 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|202|Honeypot Triggered|7|UNIFIhost=site-a1b UNIFIcategory=Security UNIFIpolicyType=Honeypot act=blocked UNIFIsrcClientIp=198.51.100.77 UNIFIsrcClientMac=00:00:5E:00:53:33 UNIFIsrcClientHostname=host-5e21 dst=198.51.100.1 dpt=445 proto=TCP UNIFIdeviceIp=198.51.100.1 UNIFIdeviceMac=00:00:5E:00:53:01 UNIFIdeviceModel=UDMPRO UNIFIrisk=high UNIFIutcTime=2026-08-13T08:15:11.203Z msg=Honeypot on host-5e21 was triggered
+# 203 arrives with NO UNIFIpolicyType, which is why the alert branch
+# excludes it by code as well as by policy type.
+<132>Aug 13 09:15:12 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|203|Threat Detected|6|UNIFIhost=site-a1b UNIFIcategory=Security act=blocked UNIFIsrcClientIp=198.51.100.24 UNIFIsrcClientMac=00:00:5E:00:53:11 dst=203.0.113.90 dpt=8080 proto=TCP UNIFIdstDomain=malware.example.org UNIFIdstRegion=ZZ UNIFIrisk=critical UNIFIutcTime=2026-08-13T08:15:12.550Z msg=Traffic to malware.example.org was blocked

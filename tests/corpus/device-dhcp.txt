@@ -1,0 +1,28 @@
+# SYNTHETIC. dnsmasq-dhcp lease traffic -> unifi-dhcp.
+#
+# MATCHED-PAIR FILE: doubled-hostname frame first, single-hostname
+# byte-identical payload second. See device-coredns.txt for why.
+#
+# All five shapes named in collector/20-processors-logs.yaml section 4,
+# plus DHCPACK with and without the optional client hostname.
+#
+# DHCPDISCOVER: no IP yet, so the MAC sits in the position every other
+# shape uses for the address. This is the optional-IP branch.
+<30>Aug 13 09:17:01 host-0a3 host-0a3 dnsmasq-dhcp[2211]: DHCPDISCOVER(br0) 00:00:5E:00:53:21
+<30>Aug 13 09:17:01 host-0a3 dnsmasq-dhcp[2211]: DHCPDISCOVER(br0) 00:00:5E:00:53:21
+# DHCPOFFER.
+<30>Aug 13 09:17:02 host-0a3 host-0a3 dnsmasq-dhcp[2211]: DHCPOFFER(br0) 198.51.100.31 00:00:5E:00:53:21
+<30>Aug 13 09:17:02 host-0a3 dnsmasq-dhcp[2211]: DHCPOFFER(br0) 198.51.100.31 00:00:5E:00:53:21
+# DHCPREQUEST, on a different bridge.
+<30>Aug 13 09:17:03 host-0a3 host-0a3 dnsmasq-dhcp[2211]: DHCPREQUEST(br3) 198.51.100.31 00:00:5E:00:53:21
+<30>Aug 13 09:17:03 host-0a3 dnsmasq-dhcp[2211]: DHCPREQUEST(br3) 198.51.100.31 00:00:5E:00:53:21
+# DHCPACK carrying the client-supplied hostname -> source domain.
+<30>Aug 13 09:17:04 host-0a3 host-0a3 dnsmasq-dhcp[2211]: DHCPACK(br3) 198.51.100.31 00:00:5E:00:53:21 host-77e5
+<30>Aug 13 09:17:04 host-0a3 dnsmasq-dhcp[2211]: DHCPACK(br3) 198.51.100.31 00:00:5E:00:53:21 host-77e5
+# DHCPACK with the hostname absent -- the trailing optional group.
+<30>Aug 13 09:17:05 host-0a3 host-0a3 dnsmasq-dhcp[2211]: DHCPACK(br3) 198.51.100.32 00:00:5E:00:53:22
+<30>Aug 13 09:17:05 host-0a3 dnsmasq-dhcp[2211]: DHCPACK(br3) 198.51.100.32 00:00:5E:00:53:22
+# "Updating leases" housekeeping. Does NOT match the DHCP pattern and is
+# deliberately left to fall through to unifi-system.
+<30>Aug 13 09:17:06 host-0a3 host-0a3 dnsmasq-dhcp[2211]: Updating leases :: age=3600 count=12
+<30>Aug 13 09:17:06 host-0a3 dnsmasq-dhcp[2211]: Updating leases :: age=3600 count=12

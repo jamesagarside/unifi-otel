@@ -1,0 +1,10 @@
+# SYNTHETIC. Audit-category CEF. Codes 544 and 546 are live codes named
+# in collector/20-processors-logs.yaml. Field values are invented.
+#
+# 544 Network Accessed -- an admin signing in. Carries the bare CEF src=,
+# which is the third and last rung of the source ip precedence ladder.
+<14>Aug 13 09:15:30 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|544|Network Accessed|1|UNIFIhost=site-a1b UNIFIcategory=Audit UNIFIadmin=user-3c8f@example.org src=203.0.113.61 UNIFIaccessMethod=Local UNIFIutcTime=2026-08-13T08:15:30.226Z msg=user-3c8f@example.org signed in to UniFi Network from 203.0.113.61
+# 546 Config Modified. UNIFIsettingsChanges is free prose containing an
+# " key=" lookalike, which is exactly what transform/cef_extensions must
+# not split on incorrectly.
+<14>Aug 13 09:15:31 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|546|Config Modified|1|UNIFIhost=site-a1b UNIFIcategory=Audit UNIFIadmin=user-3c8f@example.org src=203.0.113.61 UNIFIaccessMethod=Local UNIFIsettingsSection=Networks UNIFIsettingsEntry=Default UNIFIsettingsChanges=DHCP range changed from 198.51.100.100 to 198.51.100.200 UNIFIutcTime=2026-08-13T08:15:31.909Z msg=user-3c8f@example.org modified the Default network
