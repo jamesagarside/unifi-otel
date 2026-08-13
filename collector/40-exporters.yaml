@@ -1,0 +1,34 @@
+extensions:
+  # Probed as a liveness/readiness endpoint by whatever runs the
+  # collector — see the deployment docs for your platform.
+  health_check:
+    endpoint: 0.0.0.0:13133
+exporters:
+  # `otlp_grpc`, not `otlp` — the bare `otlp` alias is deprecated as of
+  # collector 0.157.0 and logs a warning on every start.
+  #
+  # This is the only exporter, deliberately. Point it at your own
+  # collector, gateway or backend's OTLP endpoint; destinations are
+  # documented rather than shipped as config.
+  otlp_grpc/gateway:
+    endpoint: ${env:OTLP_GATEWAY_ENDPOINT:-otel-gateway.observability.svc.cluster.local:4317}
+    tls:
+      insecure: true
+
+  # Failure records are also printed to the collector's own log in full,
+  # so the container log shows what failed without a round-trip to your
+  # backend. detailed verbosity is deliberate: failures should be rare,
+  # and the whole point is seeing the raw frame and attributes.
+  debug/parse_failures:
+    verbosity: detailed
+
+connectors:
+  # Splits syslog records by parse outcome: tagged records go to the
+  # failure pipeline, everything else continues to the normal export
+  # path.
+  routing/parse_failures:
+    default_pipelines: [logs/unifi_syslog_export]
+    table:
+      - context: log
+        condition: 'log.attributes["unifi.parse_failure"] != nil'
+        pipelines: [logs/unifi_parse_failures]

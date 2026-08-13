@@ -1,0 +1,96 @@
+processors:
+  # The UDM-SE reports 68 interfaces, most of them kernel tunnel stubs
+  # that are permanently down and always read zero. Dropping them here
+  # cuts the SNMP series count by roughly a sixth. Everything real —
+  # eth*, switch0*, br*, honeypot*, wireguard — is kept, including the
+  # ones that currently carry no traffic: a honeypot* or VLAN interface
+  # reading zero is itself the useful signal.
+  filter/dead_interfaces:
+    metrics:
+      datapoint:
+        - attributes["network.interface.name"] != nil and IsMatch(attributes["network.interface.name"], "^(lo|dummy0|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|sit0|ip6tnl0|ifb[01])$")
+
+  # SNMP reports in the units its MIBs define; semconv wants seconds and
+  # bytes. Every conversion here is a fixed scale factor, so it is safe
+  # on cumulative counters as well as gauges.
+  #
+  #   ssCpuRaw*   USER_HZ ticks (1/100 s)  -> s
+  #   sysUpTime   TimeTicks     (1/100 s)  -> s
+  #   laLoadInt   load × 100               -> load
+  #   memTotalReal / memAvailReal  KiB     -> By
+  transform/snmp_units:
+    error_mode: ignore
+    metric_statements:
+      - 'set(datapoint.value_double, datapoint.value_double / 100) where metric.name == "system.cpu.time"'
+      - 'set(datapoint.value_double, datapoint.value_double / 100) where metric.name == "system.uptime"'
+      - 'set(datapoint.value_double, datapoint.value_double / 100) where IsMatch(metric.name, "^system\\.cpu\\.load_average\\.")'
+      - 'set(datapoint.value_int, datapoint.value_int * 1024) where metric.name == "system.memory.limit"'
+      - 'set(datapoint.value_int, datapoint.value_int * 1024) where metric.name == "system.memory.usage"'
+
+  # system.memory.utilization is not something SNMP reports — UCD gives
+  # total and free, so it has to be derived. metricsgeneration can only
+  # divide one metric by another, which yields the FREE ratio; the
+  # transform below inverts it into the used ratio semconv describes.
+  #
+  # Scale-invariant, so it does not matter whether this runs before or
+  # after the KiB→bytes conversion above.
+  #
+  # CAVEAT worth knowing before trusting the number: UCD-SNMP exposes
+  # memAvailReal (genuinely free) but no memAvailable equivalent, so this
+  # ratio counts reclaimable page cache and buffers as USED. It therefore
+  # reads considerably higher than the "available" column of `free -h` —
+  # around 96% on a UDM-SE. It is the figure every UCD-based NMS shows,
+  # but it is not a memory-pressure signal on its own. Collect
+  # memCached (…2021.4.15.0) and memBuffer (…2021.4.14.0) as
+  # system.memory.usage{state=cached|buffers} if a truer figure is wanted.
+  metricsgeneration/memory_utilization:
+    rules:
+      - name: system.memory.utilization
+        unit: "1"
+        type: calculate
+        metric1: system.memory.usage
+        metric2: system.memory.limit
+        operation: divide
+
+  transform/memory_utilization_invert:
+    error_mode: ignore
+    metric_statements:
+      - 'set(datapoint.value_double, 1 - datapoint.value_double) where metric.name == "system.memory.utilization"'
+      # metricsgeneration copies metric1's attributes onto the result, so
+      # the ratio arrives carrying system.memory.state="free" — which is
+      # wrong twice over: it now measures the USED portion, and a scalar
+      # ratio has no state at all. Left in place it would also split this
+      # datapoint into its own document on document-oriented backends.
+      - 'delete_key(datapoint.attributes, "system.memory.state") where metric.name == "system.memory.utilization"'
+
+  # CPU utilisation is deliberately NOT derived here.
+  #
+  # system.cpu.time is a cumulative counter split across four cpu.mode
+  # values in a single metric; metricsgeneration works metric-to-metric
+  # and cannot divide one attribute's datapoints by the sum of the rest,
+  # and computing a ratio from the idle mode alone would need the core
+  # count, which SNMP does not expose on this device.
+  #
+  # cumulative_to_delta solves it at query time instead: with delta
+  # temporality the utilisation is plain arithmetic over a bucket, with
+  # no RATE function. That matters on any query language without one —
+  # for example Elasticsearch's ES|QL, where the equivalent is:
+  #
+  #   FROM metrics-*
+  #   | WHERE metrics.system.cpu.time IS NOT NULL
+  #   | STATS s = SUM(metrics.system.cpu.time) BY attributes.cpu.mode
+  #   | ... utilisation = 1 - idle / total
+  #
+  # On a backend that does have a rate function, cumulative would work
+  # equally well — drop this processor if you prefer that.
+  cumulative_to_delta/cpu:
+    include:
+      metrics: [system.cpu.time]
+      match_type: strict
+    # Without this, the first datapoint after every collector start is
+    # emitted as the raw cumulative counter rather than a delta, because
+    # there is no previous sample to subtract. Measured: a ~1,950,000 s
+    # spike against a steady-state delta of ~142 s, which wrecks any
+    # average over a window containing a restart. `drop` discards that
+    # first point instead; the next scrape 60s later is a true delta.
+    initial_value: drop

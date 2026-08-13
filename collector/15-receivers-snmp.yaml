@@ -1,0 +1,254 @@
+receivers:
+  # ── SNMP ────────────────────────────────────────────────────────────
+  # Poll-only; snmpreceiver has no trap support and no MIB support, so
+  # every OID below is hand-mapped. Enable SNMP first under
+  # UniFi Network → Settings → CyberSecure → Traffic Logging → SNMP.
+  #
+  # v3 auth_priv, verified against a UDM-SE with snmpwalk. UniFi's
+  # SNMP v3 form takes a single password and uses it for both the auth
+  # and privacy keys, which is why both fields read from one secret.
+  #
+  # NOTE: SNMP only reaches the console. Adopted APs and switches serve
+  # no SNMP of their own, so there are no per-port counters for them —
+  # a UniFi limitation, not a gap in this config.
+  #
+  # ── Naming ──
+  # Metric names follow the OpenTelemetry system-metrics semantic
+  # conventions. That IS the ECS-aligned spelling for metric data: the
+  # ECS ↔ OTel alignment table marks these pairs with the relationship
+  # "metric", meaning the ECS field maps to an OTel *metric* rather than
+  # to an attribute —
+  #     host.cpu.usage             ↔ system.cpu.utilization
+  #     host.network.ingress.bytes ↔ system.network.io
+  #     host.network.ingress.packets ↔ system.network.packet.count
+  #     host.uptime                ↔ system.uptime
+  # https://www.elastic.co/docs/reference/ecs/ecs-otel-alignment-details
+  #
+  # The interface dimension is emitted twice on purpose: semconv says
+  # network.interface.name, ECS has an interface.* field set, and the
+  # alignment table lists no row pairing them. Same call as source.ip /
+  # source.address on the log side, and since the two are 1:1 it adds a
+  # field to the series identity without splitting any series.
+  #
+  # ── Why two receivers ──
+  # NOTE: this rationale is currently written in terms of one specific
+  # backend's document model and is being rewritten on backend-neutral
+  # grounds — see issue #19. The split itself is sound regardless: error
+  # and discard counters move slowly and do not need a 60s poll.
+  #
+  # A document-per-(attribute set × unit) backend pays for the fact that
+  # semconv makes network.io.direction an *attribute* where the old shape
+  # had it in the metric name (io.in / io.out). That splits each
+  # interface's datapoints across receive/transmit, taking a single 60s
+  # receiver from 4 to 7 documents per interface per minute — a ~75%
+  # increase on the previous shape.
+  #
+  # Error and discard counters move slowly, so they poll at 300s instead.
+  # That lands the total roughly flat against the previous shape while
+  # gaining semconv naming and the derived utilisation metrics.
+  # Re-measure if your interface count differs.
+  snmp/unifi:
+    collection_interval: 60s
+    endpoint: &snmp_endpoint udp://${env:UNIFI_HOST:-192.0.2.1}:161
+    version: &snmp_version v3
+    security_level: &snmp_security_level auth_priv
+    user: &snmp_user ${env:UNIFI_SNMP_USER}
+    auth_type: &snmp_auth_type SHA
+    auth_password: &snmp_auth_password ${env:UNIFI_SNMP_PASSWORD}
+    privacy_type: &snmp_privacy_type AES
+    privacy_password: &snmp_privacy_password ${env:UNIFI_SNMP_PASSWORD}
+
+    # host.name rather than a vendor-specific attribute: it is what
+    # infrastructure UIs key on, so the UDM appears alongside your other
+    # hosts instead of being an orphan series.
+    resource_attributes: &snmp_resource_attributes
+      host.name:
+        scalar_oid: "1.3.6.1.2.1.1.5.0"  # sysName
+        description: SNMP sysName of the polled device
+
+    attributes: &snmp_interface_attributes
+      network.interface.name:
+        oid: "1.3.6.1.2.1.31.1.1.1.1"  # ifName
+        description: Interface name as reported by IF-MIB (OTel semconv)
+      interface.name:
+        oid: "1.3.6.1.2.1.31.1.1.1.1"  # ifName
+        description: Interface name as reported by IF-MIB (ECS)
+      network.io.direction:
+        enum: [receive, transmit]
+        description: Direction of the counter, per OTel semconv
+      cpu.mode:
+        enum: [user, system, idle, iowait]
+        description: Which CPU tick counter this datapoint came from
+      system.memory.state:
+        enum: [free]
+        description: Which portion of memory this datapoint measures
+
+    metrics:
+      # IF-MIB 64-bit octet counters. Present on every snmpd build.
+      system.network.io:
+        unit: "By"
+        sum: &counter
+          monotonic: true
+          value_type: int
+          aggregation: cumulative
+        column_oids:
+          - oid: "1.3.6.1.2.1.31.1.1.1.6"  # ifHCInOctets
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+              - {name: network.io.direction, value: receive}
+            resource_attributes: [host.name]
+          - oid: "1.3.6.1.2.1.31.1.1.1.10"  # ifHCOutOctets
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+              - {name: network.io.direction, value: transmit}
+            resource_attributes: [host.name]
+
+      # 1 = up, 2 = down, 3 = testing (IF-MIB ifOperStatus). Semconv has
+      # no link-state metric, so this keeps a unifi.* name.
+      unifi.interface.operational.status:
+        unit: "{status}"
+        gauge:
+          value_type: int
+        column_oids:
+          - oid: "1.3.6.1.2.1.2.2.1.8"
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+            resource_attributes: [host.name]
+
+      # ── UCD-SNMP-MIB host health ──────────────────────────────────
+      # Confirmed present on a UDM-SE (UniFi OS 5.x) by snmpwalk
+      # over 1.3.6.1.4.1.2021.
+      #
+      # CPU uses the raw tick counters rather than ssCpuUser/System/Idle.
+      # Those three are pre-averaged over snmpd's own sampling window and
+      # read as "No Such Instance" for the first minute after snmpd
+      # restarts; the raw counters are monotonic.
+      #
+      # Declared as seconds because that is the semconv unit for
+      # system.cpu.time — transform/snmp_units divides the USER_HZ ticks
+      # by 100. value_type double so the division has somewhere to land.
+      system.cpu.time:
+        unit: "s"
+        sum:
+          monotonic: true
+          value_type: double
+          aggregation: cumulative
+        scalar_oids:
+          - oid: "1.3.6.1.4.1.2021.11.50.0"  # ssCpuRawUser
+            attributes: [{name: cpu.mode, value: user}]
+            resource_attributes: [host.name]
+          - oid: "1.3.6.1.4.1.2021.11.52.0"  # ssCpuRawSystem
+            attributes: [{name: cpu.mode, value: system}]
+            resource_attributes: [host.name]
+          - oid: "1.3.6.1.4.1.2021.11.53.0"  # ssCpuRawIdle
+            attributes: [{name: cpu.mode, value: idle}]
+            resource_attributes: [host.name]
+          # semconv spells this mode "iowait"; UCD calls the OID ssCpuRawWait.
+          - oid: "1.3.6.1.4.1.2021.11.54.0"  # ssCpuRawWait
+            attributes: [{name: cpu.mode, value: iowait}]
+            resource_attributes: [host.name]
+
+      # laLoadInt reports load average × 100 (the plain laLoad OID is a
+      # string, which the receiver cannot read). Three separate metric
+      # names rather than one metric with an interval attribute: that is
+      # what the hostmetrics receiver emits, and identical units plus
+      # identical (empty) attributes keeps them together downstream.
+      system.cpu.load_average.1m:
+        unit: "1"
+        gauge: &load_gauge
+          value_type: double
+        scalar_oids:
+          - oid: "1.3.6.1.4.1.2021.10.1.5.1"
+            resource_attributes: [host.name]
+      system.cpu.load_average.5m:
+        unit: "1"
+        gauge: *load_gauge
+        scalar_oids:
+          - oid: "1.3.6.1.4.1.2021.10.1.5.2"
+            resource_attributes: [host.name]
+      system.cpu.load_average.15m:
+        unit: "1"
+        gauge: *load_gauge
+        scalar_oids:
+          - oid: "1.3.6.1.4.1.2021.10.1.5.3"
+            resource_attributes: [host.name]
+
+      # UCD reports KiB; semconv wants bytes. transform/snmp_units scales.
+      system.memory.limit:
+        unit: "By"
+        gauge:
+          value_type: int
+        scalar_oids:
+          - oid: "1.3.6.1.4.1.2021.4.5.0"  # memTotalReal
+            resource_attributes: [host.name]
+
+      system.memory.usage:
+        unit: "By"
+        gauge:
+          value_type: int
+        scalar_oids:
+          - oid: "1.3.6.1.4.1.2021.4.6.0"  # memAvailReal
+            attributes: [{name: system.memory.state, value: free}]
+            resource_attributes: [host.name]
+
+      # TimeTicks are hundredths of a second; semconv wants seconds.
+      system.uptime:
+        unit: "s"
+        gauge:
+          value_type: double
+        scalar_oids:
+          - oid: "1.3.6.1.2.1.1.3.0"  # sysUpTime
+            resource_attributes: [host.name]
+
+  # Error and discard counters only. Separate receiver purely so these
+  # can poll five times less often — see the note above.
+  snmp/unifi_slow:
+    collection_interval: 300s
+    endpoint: *snmp_endpoint
+    version: *snmp_version
+    security_level: *snmp_security_level
+    user: *snmp_user
+    auth_type: *snmp_auth_type
+    auth_password: *snmp_auth_password
+    privacy_type: *snmp_privacy_type
+    privacy_password: *snmp_privacy_password
+    resource_attributes: *snmp_resource_attributes
+    attributes: *snmp_interface_attributes
+
+    metrics:
+      system.network.errors:
+        unit: "{error}"
+        sum: *counter
+        column_oids:
+          - oid: "1.3.6.1.2.1.2.2.1.14"  # ifInErrors
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+              - {name: network.io.direction, value: receive}
+            resource_attributes: [host.name]
+          - oid: "1.3.6.1.2.1.2.2.1.20"  # ifOutErrors
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+              - {name: network.io.direction, value: transmit}
+            resource_attributes: [host.name]
+
+      system.network.packet.dropped:
+        unit: "{packet}"
+        sum: *counter
+        column_oids:
+          - oid: "1.3.6.1.2.1.2.2.1.13"  # ifInDiscards
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+              - {name: network.io.direction, value: receive}
+            resource_attributes: [host.name]
+          - oid: "1.3.6.1.2.1.2.2.1.19"  # ifOutDiscards
+            attributes:
+              - {name: network.interface.name}
+              - {name: interface.name}
+              - {name: network.io.direction, value: transmit}
+            resource_attributes: [host.name]

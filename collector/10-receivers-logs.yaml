@@ -1,0 +1,70 @@
+receivers:
+  # ── Syslog ────────────────────────────────────────────────────────
+  # Bound to unprivileged ports inside the container so the pod can run
+  # as non-root; map the standard 514/601 onto them at the Service,
+  # Compose port mapping or firewall, whichever your deployment uses.
+  #
+  # allow_skip_pri_header keeps non-conforming UDM frames (long firewall
+  # lines, JSON blobs without a PRI) from being dropped as parse errors.
+  # This was the failure that made an earlier version of this config ship
+  # raw text instead of parsing — parsed records with no timestamp were
+  # rejected downstream. The timestamp_guard processor backstops that.
+  syslog/unifi_udp:
+    udp:
+      listen_address: 0.0.0.0:5514
+    protocol: rfc3164
+    # ⚠ SET THIS TO YOUR OWN TIMEZONE. The UDM stamps RFC3164 syslog in
+    # LOCAL time with no offset, so this must match the UDM's timezone or
+    # every non-CEF record lands hours out. Verified 2026-08-11 against
+    # the UNIFIutcTime CEF field: with UTC here, records land one hour in
+    # the future during BST.
+    #
+    # It fails SILENTLY — there is no error, just wrong timestamps. An
+    # unset env var expands to empty and the receiver falls back to UTC
+    # (verified against 0.157.0), which is why there is a default here
+    # rather than a bare ${env:...}. Set the variable explicitly in your
+    # deployment; the default only catches someone who has cloned this
+    # and not read the README.
+    #
+    # To check: compare a device-syslog timestamp against the wall clock
+    # on the UDM. A whole number of hours out means this is wrong.
+    #
+    # This only backstops non-CEF frames now — transform/unifi_ecs
+    # re-stamps every CEF record from UNIFIutcTime, which is UTC and
+    # millisecond-precise where the syslog header is local and truncated
+    # to the second.
+    location: ${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}
+    allow_skip_pri_header: true
+    operators: &unifi_syslog_operators
+      # UniFi is not wholly CEF — only events routed through the SIEM
+      # Server are. The operator is conditional, so ordinary syslog
+      # passes through with just the RFC3164 fields set.
+      #
+      # The syslog parser writes to attributes, NOT body: the message
+      # text lands in attributes.message and body keeps the raw frame.
+      #
+      # Only the CEF envelope is split here; the extension string is
+      # turned into a map by transform/cef_extensions below. Capture
+      # groups are all cef_-prefixed so the cleanup stage can drop the
+      # working set with one delete_matching_keys.
+      - type: regex_parser
+        if: 'attributes?.message != nil and attributes.message matches "CEF:\\d+\\|"'
+        parse_from: attributes.message
+        regex: 'CEF:(?P<cef_version>\d+)\|(?P<cef_vendor>[^|]*)\|(?P<cef_product>[^|]*)\|(?P<cef_device_version>[^|]*)\|(?P<cef_signature_id>[^|]*)\|(?P<cef_name>[^|]*)\|(?P<cef_severity>[^|]*)\|(?P<cef_extensions>.*)'
+        on_error: send
+
+  # UniFi's newer SIEM Server option emits RFC5424 over TCP.
+  syslog/unifi_tcp:
+    tcp:
+      listen_address: 0.0.0.0:6601
+    protocol: rfc5424
+    allow_skip_pri_header: true
+    operators: *unifi_syslog_operators
+
+  # There is deliberately no webhook receiver. The UDM emitted an Alarm
+  # Manager webhook AND a SIEM Server syslog record for every alarm, with
+  # identical timestamps and identical text, and syslog is the superset —
+  # it carries every SIEM event, not just the ones Alarm Manager was
+  # configured to forward. See the README for what that gives up (UniFi
+  # Protect and Access alarms, which the Network SIEM feed does not
+  # carry) and issue #21 if you have that hardware to test against.

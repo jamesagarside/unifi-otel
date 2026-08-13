@@ -1,0 +1,65 @@
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    # Syslog splits by parse outcome at routing/parse_failures; the
+    # export and failure pipelines below receive from the connector.
+    # Note tag_parse_failures runs BEFORE strip_working_fields, since
+    # it inspects the cef_* working attributes.
+    #
+    # device_syslog sits between unifi_ecs and strip_working_fields: it
+    # needs the non-CEF fallback to have run (it refines event.dataset off
+    # unifi.syslog) and it reads `message`, which strip removes.
+    logs/unifi_syslog:
+      receivers: [syslog/unifi_udp, syslog/unifi_tcp]
+      processors:
+        - memory_limiter
+        - transform/cef_extensions
+        - transform/tag_parse_failures
+        - transform/unifi_ecs
+        - transform/device_syslog
+        - transform/tag_mapping_failures
+        - transform/strip_working_fields
+      exporters: [routing/parse_failures]
+
+    logs/unifi_syslog_export:
+      receivers: [routing/parse_failures]
+      processors:
+        - transform/timestamp_guard
+        - resource/unifi
+        - batch
+      exporters: [otlp_grpc/gateway]
+
+    # Records that failed to parse take the same export path, but are
+    # also printed in full by the debug exporter. They carry
+    # unifi.parse_failure with the stage that failed, so route or filter
+    # them downstream on that attribute if you want them separated.
+    logs/unifi_parse_failures:
+      receivers: [routing/parse_failures]
+      processors:
+        - transform/timestamp_guard
+        - resource/unifi
+        - batch
+      exporters: [otlp_grpc/gateway, debug/parse_failures]
+
+    # Both SNMP receivers share one pipeline — they differ only in poll
+    # interval and which counters they carry, so the shaping is identical.
+    #
+    # Order matters: units are normalised first, then the memory ratio is
+    # derived from the normalised gauges and inverted, and cumulative CPU
+    # ticks become deltas last so nothing downstream sees a mixed
+    # temporality.
+    metrics/unifi_snmp:
+      receivers: [snmp/unifi, snmp/unifi_slow]
+      processors:
+        - memory_limiter
+        - filter/dead_interfaces
+        - transform/snmp_units
+        - metricsgeneration/memory_utilization
+        - transform/memory_utilization_invert
+        - cumulative_to_delta/cpu
+        - resource/unifi
+        - batch
+      exporters: [otlp_grpc/gateway]
