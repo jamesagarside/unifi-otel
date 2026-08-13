@@ -1,0 +1,41 @@
+apiVersion: v2
+name: unifi-otel
+description: >-
+  UniFi syslog and SNMP telemetry for the OpenTelemetry Collector. A thin
+  wrapper that supplies this project's pipeline to the upstream
+  opentelemetry-collector chart; it ships values, not manifests.
+type: application
+
+# Chart version. Bumped independently of the collector config.
+version: 0.1.0
+
+# The collector release this pipeline is verified against. It is also
+# pinned as image.tag in values.yaml so the running binary matches, rather
+# than drifting with the dependency's appVersion on the next bump.
+appVersion: "0.157.0"
+
+home: https://github.com/jamesagarside/unifi-otel
+sources:
+  - https://github.com/jamesagarside/unifi-otel
+
+keywords:
+  - unifi
+  - ubiquiti
+  - syslog
+  - cef
+  - snmp
+  - opentelemetry
+
+maintainers:
+  - name: jamesagarside
+    url: https://github.com/jamesagarside
+
+dependencies:
+  # Everything Kubernetes-shaped comes from here: Deployment, Service,
+  # ConfigMap, ServiceAccount, probes, securityContext and the config-hash
+  # annotation that rolls the pod when the pipeline changes. This chart
+  # deliberately adds no templates of its own beyond NOTES.txt, so a
+  # consumer keeps every knob the upstream chart exposes.
+  - name: opentelemetry-collector
+    version: 0.168.0
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts

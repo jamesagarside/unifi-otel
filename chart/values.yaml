@@ -1,0 +1,562 @@
+# ─────────────────────────────────────────────────────────────────────
+# unifi-otel — values for the upstream opentelemetry-collector chart.
+#
+# Everything below lives under the `opentelemetry-collector` key because
+# that is the dependency declared in Chart.yaml. This chart renders no
+# Kubernetes objects of its own: the Deployment, Service, ConfigMap,
+# probes, securityContext and config-hash rollout all come from upstream,
+# and every value upstream exposes is reachable from here.
+#
+# ── Where the pipeline comes from ────────────────────────────────────
+# On a host, the collector is started with repeated --config flags:
+#
+#   --config=/conf/10-receivers-logs.yaml
+#   --config=/conf/20-processors-logs.yaml
+#   --config=/conf/40-exporters.yaml
+#   --config=/conf/90-service.yaml
+#
+# The collector has no glob or directory mode, so that list IS the whole
+# configuration surface. In Kubernetes the upstream chart mounts exactly
+# one file, so those four are deep-merged here into a single
+# `alternateConfig` map — the same merge the collector would have done.
+#
+# `alternateConfig` REPLACES the upstream `config` outright rather than
+# merging into it, which is the semantic this project wants: the pipeline
+# is complete and opinionated, and nothing from the upstream default
+# config (its otlp/jaeger/zipkin receivers, its debug exporter) should
+# survive into it.
+#
+# collector/*.yaml remains the annotated source of truth. Every design
+# decision, every "verified by replay" note and every warning about what
+# breaks if you change a line is recorded there; this file is the same
+# configuration with the essays stripped, so the rationale cannot drift
+# between two copies. Read collector/*.yaml before editing anything under
+# alternateConfig, and re-run the validate step in docs/helm.md after.
+#
+# ── YAML anchors ─────────────────────────────────────────────────────
+# Anchors do not cross --config files, which is why collector/*.yaml
+# defines and consumes each anchor inside a single file. Merging those
+# files into one YAML document here is therefore safe in one direction
+# and unsafe in the other: an anchor whose definition and use were
+# already in the same file still resolves, but nothing may be added that
+# aliases across what used to be a file boundary — that would work in the
+# chart and fail on the host deployment.
+#
+# Note also that Helm resolves anchors when it parses this file and emits
+# the expansion, so `*unifi_syslog_operators` below appears written out in
+# full in the rendered ConfigMap. That is the same document the collector
+# would have built from the four files.
+#
+# ── SNMP ─────────────────────────────────────────────────────────────
+# Off by default, exactly as with the --config flags. Turn it on with the
+# values-snmp.yaml overlay; see docs/helm.md.
+# ─────────────────────────────────────────────────────────────────────
+
+opentelemetry-collector:
+  # The syslog receivers hold long-lived TCP connections and bind a fixed
+  # UDP port; there is no node-local data to collect, so this is a
+  # deployment rather than a daemonset.
+  mode: deployment
+  replicaCount: 1
+
+  # contrib, not core: syslogreceiver, snmpreceiver, the transform and
+  # metricsgeneration processors and the routing connector are all
+  # contrib components.
+  #
+  # The tag is pinned rather than left to track the dependency's
+  # appVersion, so bumping the chart dependency cannot silently move the
+  # collector binary away from the version this pipeline is verified
+  # against (see appVersion in Chart.yaml).
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.157.0"
+    pullPolicy: IfNotPresent
+
+  # ── Ports ──────────────────────────────────────────────────────────
+  # The receivers bind unprivileged ports inside the container so the pod
+  # can run as non-root; the standard syslog ports are mapped onto them at
+  # the Service. Upstream keeps containerPort and servicePort separate,
+  # so 514 -> 5514 and 601 -> 6601 need no privileged capability and no
+  # init container.
+  #
+  # Both live on ONE Service, which is upstream's behaviour — it renders a
+  # single Service and sets `protocol` per port, mixing UDP and TCP. Do
+  # not split them into two Services. Any load balancer that claims an
+  # address by L2 announcement takes a lease per Service, and two leases
+  # for what the sender treats as one syslog target can be granted to
+  # different nodes; both then answer ARP for their own address. UDP
+  # tolerates the resulting churn, a long-lived syslog TCP connection does
+  # not.
+  #
+  # Upstream's own default ports are all disabled: this collector receives
+  # syslog and nothing else, and an open OTLP or Zipkin port on a
+  # LoadBalancer address is an unintended ingress.
+  ports:
+    otlp:
+      enabled: false
+    otlp-http:
+      enabled: false
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+    metrics:
+      # The collector's own internal metrics. Enable if you want to scrape
+      # them; the pipeline does not depend on it.
+      enabled: false
+
+    syslog-udp:
+      enabled: true
+      containerPort: 5514
+      servicePort: 514
+      protocol: UDP
+    syslog-tcp:
+      enabled: true
+      containerPort: 6601
+      servicePort: 601
+      protocol: TCP
+
+  # ── Service ────────────────────────────────────────────────────────
+  # Neutral defaults. A UniFi console sends syslog to a fixed address, so
+  # in practice this wants to be a LoadBalancer with a pinned address —
+  # but which controller provides that address, and what it needs told,
+  # belongs to the cluster and not to this chart. Set them here:
+  #
+  #   service:
+  #     type: LoadBalancer
+  #     loadBalancerIP: 198.51.100.10
+  #     annotations:
+  #       whatever.your-load-balancer/expects: "..."
+  #
+  # `annotations` is a free-form map and `loadBalancerIP` a plain value,
+  # so no controller-specific key is baked in anywhere. See docs/helm.md.
+  service:
+    type: ClusterIP
+    annotations: {}
+
+  # ── Environment ────────────────────────────────────────────────────
+  # This is a LIST, so anything you supply REPLACES it wholesale rather
+  # than merging. Restate these two entries in your own values file.
+  #
+  # Both variables also have defaults inside alternateConfig, so an unset
+  # variable will not stop the collector starting. That is precisely why
+  # UNIFI_SYSLOG_TIMEZONE is listed here: the UniFi console stamps RFC3164
+  # syslog in LOCAL time with no offset, so a wrong value lands every
+  # non-CEF record a whole number of hours out, SILENTLY. Set it to the
+  # console's timezone.
+  #
+  # For SNMP credentials use extraEnvsFrom below rather than adding
+  # plaintext entries here.
+  extraEnvs:
+    - name: OTLP_GATEWAY_ENDPOINT
+      value: "otel-gateway.observability.svc.cluster.local:4317"
+    - name: UNIFI_SYSLOG_TIMEZONE
+      value: "Etc/UTC"
+
+  # envFrom sources. A separate list from extraEnvs, so putting the SNMP
+  # Secret here leaves the two variables above intact:
+  #
+  #   extraEnvsFrom:
+  #     - secretRef:
+  #         name: unifi-snmp
+  extraEnvsFrom: []
+
+  # memory_limiter in the pipeline is configured with limit_percentage, so
+  # it measures itself against this limit. With no limit set it measures
+  # against total host memory instead and will not protect anything.
+  resources:
+    limits:
+      memory: 512Mi
+
+  # Left at the upstream defaults on purpose. The receivers bind 5514 and
+  # 6601, so the pod needs no added capability and no privileged port; the
+  # contrib image already runs as a non-root user. Harden further from
+  # your own values file if your cluster requires it — for example a
+  # read-only root filesystem, or an explicit runAsNonRoot — rather than
+  # inheriting this project's opinion.
+  podSecurityContext: {}
+  securityContext: {}
+
+  # ── The pipeline ───────────────────────────────────────────────────
+  # collector/10-receivers-logs.yaml, 20-processors-logs.yaml,
+  # 40-exporters.yaml and 90-service.yaml, deep-merged. Annotated
+  # originals live in collector/.
+  alternateConfig:
+    receivers:
+      syslog/unifi_udp:
+        udp:
+          listen_address: 0.0.0.0:5514
+        protocol: rfc3164
+        location: ${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}
+        allow_skip_pri_header: true
+        operators: &unifi_syslog_operators
+          - type: regex_parser
+            if: 'attributes?.message != nil and attributes.message matches "CEF:\\d+\\|"'
+            parse_from: attributes.message
+            regex: 'CEF:(?P<cef_version>\d+)\|(?P<cef_vendor>[^|]*)\|(?P<cef_product>[^|]*)\|(?P<cef_device_version>[^|]*)\|(?P<cef_signature_id>[^|]*)\|(?P<cef_name>[^|]*)\|(?P<cef_severity>[^|]*)\|(?P<cef_extensions>.*)'
+            on_error: send
+      syslog/unifi_tcp:
+        tcp:
+          listen_address: 0.0.0.0:6601
+        protocol: rfc5424
+        allow_skip_pri_header: true
+        operators: *unifi_syslog_operators
+    processors:
+      memory_limiter:
+        check_interval: 2s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      transform/cef_extensions:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            conditions:
+              - 'attributes["cef_extensions"] != nil'
+            statements:
+              - 'replace_pattern(log.attributes["cef_extensions"], "\\s([A-Za-z][A-Za-z0-9_]*)=", "\n$$1=")'
+              - 'set(log.attributes["cef_kv"], ParseKeyValue(log.attributes["cef_extensions"], "=", "\n"))'
+      transform/unifi_ecs:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - 'set(log.attributes["observer.name"], log.attributes["hostname"]) where log.attributes["hostname"] != nil'
+              - 'set(log.attributes["process.name"], log.attributes["appname"]) where log.attributes["appname"] != nil and log.attributes["appname"] != "CEF"'
+              - 'set(log.attributes["process.pid"], Int(log.attributes["proc_id"])) where log.attributes["proc_id"] != nil and log.attributes["appname"] != "CEF"'
+              - 'set(log.attributes["log.syslog.priority"], log.attributes["priority"]) where log.attributes["priority"] != nil'
+              - 'set(log.attributes["log.syslog.facility.code"], log.attributes["facility"]) where log.attributes["facility"] != nil'
+              - 'set(log.attributes["log.syslog.facility.name"], log.attributes["facility_text"]) where log.attributes["facility_text"] != nil'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] != nil'
+            statements:
+              - 'set(log.attributes["event.original"], log.body) where IsString(log.body)'
+              - 'set(log.attributes["event.module"], "unifi")'
+              - 'set(log.attributes["event.provider"], "unifi-network")'
+              - 'set(log.attributes["event.code"], log.attributes["cef_signature_id"])'
+              - 'set(log.attributes["event.severity"], Int(log.attributes["cef_severity"]))'
+              - 'set(log.attributes["observer.vendor"], log.attributes["cef_vendor"])'
+              - 'set(log.attributes["observer.product"], log.attributes["cef_product"])'
+              - 'set(log.attributes["observer.version"], log.attributes["cef_device_version"])'
+              - 'set(log.attributes["observer.type"], "firewall")'
+              - 'set(log.attributes["unifi.site"], log.attributes["cef_kv"]["UNIFIhost"])'
+              - 'set(log.attributes["unifi.category"], log.attributes["cef_kv"]["UNIFIcategory"])'
+              - 'set(log.attributes["event.action"], log.attributes["cef_name"])'
+              - 'replace_pattern(log.attributes["event.action"], "\\s+", "_")'
+              - 'set(log.attributes["event.action"], ConvertCase(log.attributes["event.action"], "lower"))'
+              - 'set(log.time, Time(log.attributes["cef_kv"]["UNIFIutcTime"], "%Y-%m-%dT%H:%M:%S.%LZ")) where log.attributes["cef_kv"]["UNIFIutcTime"] != nil'
+              - 'set(log.body, log.attributes["cef_kv"]["msg"]) where log.attributes["cef_kv"]["msg"] != nil'
+              - 'set(log.severity_number, SEVERITY_NUMBER_INFO) where Int(log.attributes["cef_severity"]) <= 3'
+              - 'set(log.severity_number, SEVERITY_NUMBER_WARN) where Int(log.attributes["cef_severity"]) > 3 and Int(log.attributes["cef_severity"]) <= 6'
+              - 'set(log.severity_number, SEVERITY_NUMBER_ERROR) where Int(log.attributes["cef_severity"]) > 6'
+              - 'set(log.severity_text, "INFO") where log.severity_number == SEVERITY_NUMBER_INFO'
+              - 'set(log.severity_text, "WARN") where log.severity_number == SEVERITY_NUMBER_WARN'
+              - 'set(log.severity_text, "ERROR") where log.severity_number == SEVERITY_NUMBER_ERROR'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] != nil'
+            statements:
+              - 'set(log.attributes["event.kind"], "event")'
+              - 'set(log.attributes["event.dataset"], "unifi.network")'
+              - 'set(log.attributes["event.category"], ["network"])'
+              - 'set(log.attributes["event.type"], ["info"])'
+              - 'set(log.attributes["event.dataset"], "unifi.client") where log.attributes["cef_kv"]["UNIFIcategory"] == "Client Devices"'
+              - 'set(log.attributes["event.dataset"], "unifi.audit") where log.attributes["cef_kv"]["UNIFIcategory"] == "Audit"'
+              - 'set(log.attributes["event.dataset"], "unifi.security") where log.attributes["cef_kv"]["UNIFIcategory"] == "Security"'
+              - 'set(log.attributes["event.category"], ["configuration"]) where log.attributes["cef_kv"]["UNIFIcategory"] == "Audit"'
+              - 'set(log.attributes["event.type"], ["change"]) where log.attributes["cef_kv"]["UNIFIcategory"] == "Audit"'
+              - 'set(log.attributes["event.dataset"], "unifi.firewall") where log.attributes["cef_kv"]["UNIFIpolicyType"] == "Firewall"'
+              - 'set(log.attributes["event.category"], ["network"]) where log.attributes["cef_kv"]["UNIFIpolicyType"] == "Firewall"'
+              - 'set(log.attributes["event.type"], ["connection", "denied"]) where log.attributes["cef_kv"]["act"] == "blocked"'
+              - 'set(log.attributes["event.type"], ["connection", "allowed"]) where log.attributes["cef_kv"]["act"] == "allowed"'
+              - 'set(log.attributes["event.kind"], "alert") where log.attributes["cef_kv"]["UNIFIcategory"] == "Security" and log.attributes["cef_signature_id"] != "203" and log.attributes["cef_kv"]["UNIFIpolicyType"] != "Firewall"'
+              - 'set(log.attributes["event.category"], ["intrusion_detection", "network"]) where log.attributes["cef_kv"]["UNIFIcategory"] == "Security" and log.attributes["cef_signature_id"] != "203" and log.attributes["cef_kv"]["UNIFIpolicyType"] != "Firewall"'
+              - 'set(log.attributes["event.type"], ["info"]) where log.attributes["cef_signature_id"] == "202"'
+              - 'set(log.attributes["event.type"], ["connection", "end"]) where log.attributes["cef_signature_id"] == "401" or log.attributes["cef_signature_id"] == "404"'
+              - 'set(log.attributes["event.type"], ["connection", "start"]) where log.attributes["cef_signature_id"] == "403" or log.attributes["cef_signature_id"] == "405"'
+              - 'set(log.attributes["event.type"], ["connection", "change"]) where log.attributes["cef_signature_id"] == "402"'
+              - 'set(log.attributes["event.category"], ["authentication"]) where log.attributes["cef_signature_id"] == "544"'
+              - 'set(log.attributes["event.type"], ["start"]) where log.attributes["cef_signature_id"] == "544"'
+              - 'set(log.attributes["event.outcome"], "success") where log.attributes["cef_signature_id"] == "544"'
+              - 'set(log.attributes["event.category"], ["configuration"]) where log.attributes["cef_signature_id"] == "546"'
+              - 'set(log.attributes["event.type"], ["change"]) where log.attributes["cef_signature_id"] == "546"'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil'
+            statements:
+              - 'set(log.attributes["event.module"], "unifi")'
+              - 'set(log.attributes["event.provider"], "unifi-syslog")'
+              - 'set(log.attributes["event.kind"], "event")'
+              - 'set(log.attributes["event.dataset"], "unifi.syslog")'
+              - 'set(log.attributes["event.category"], ["network"])'
+              - 'set(log.attributes["event.type"], ["info"])'
+              - 'set(log.attributes["observer.vendor"], "Ubiquiti")'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] != nil'
+            statements:
+              - 'set(log.attributes["source.ip"], log.attributes["cef_kv"]["UNIFIsrcClientIp"]) where log.attributes["cef_kv"]["UNIFIsrcClientIp"] != nil'
+              - 'set(log.attributes["source.ip"], log.attributes["cef_kv"]["UNIFIclientIp"]) where log.attributes["source.ip"] == nil and log.attributes["cef_kv"]["UNIFIclientIp"] != nil'
+              - 'set(log.attributes["source.ip"], log.attributes["cef_kv"]["src"]) where log.attributes["source.ip"] == nil and log.attributes["cef_kv"]["src"] != nil'
+              - 'set(log.attributes["source.mac"], log.attributes["cef_kv"]["UNIFIsrcClientMac"]) where log.attributes["cef_kv"]["UNIFIsrcClientMac"] != nil'
+              - 'set(log.attributes["source.mac"], log.attributes["cef_kv"]["UNIFIclientMac"]) where log.attributes["source.mac"] == nil and log.attributes["cef_kv"]["UNIFIclientMac"] != nil'
+              - 'set(log.attributes["source.domain"], log.attributes["cef_kv"]["UNIFIsrcClientHostname"]) where log.attributes["cef_kv"]["UNIFIsrcClientHostname"] != nil'
+              - 'set(log.attributes["source.domain"], log.attributes["cef_kv"]["UNIFIclientHostname"]) where log.attributes["source.domain"] == nil and log.attributes["cef_kv"]["UNIFIclientHostname"] != nil'
+              - 'set(log.attributes["source.port"], Int(log.attributes["cef_kv"]["spt"])) where log.attributes["cef_kv"]["spt"] != nil'
+              - 'set(log.attributes["destination.ip"], log.attributes["cef_kv"]["dst"]) where log.attributes["cef_kv"]["dst"] != nil'
+              - 'set(log.attributes["destination.port"], Int(log.attributes["cef_kv"]["dpt"])) where log.attributes["cef_kv"]["dpt"] != nil'
+              - 'set(log.attributes["destination.domain"], log.attributes["cef_kv"]["UNIFIdstDomain"]) where log.attributes["cef_kv"]["UNIFIdstDomain"] != nil'
+              - 'set(log.attributes["destination.geo.country_iso_code"], log.attributes["cef_kv"]["UNIFIdstRegion"]) where log.attributes["cef_kv"]["UNIFIdstRegion"] != nil'
+              - 'set(log.attributes["source.address"], log.attributes["source.ip"]) where log.attributes["source.ip"] != nil'
+              - 'set(log.attributes["destination.address"], log.attributes["destination.ip"]) where log.attributes["destination.ip"] != nil'
+              - 'set(log.attributes["network.transport"], ConvertCase(log.attributes["cef_kv"]["proto"], "lower")) where log.attributes["cef_kv"]["proto"] != nil'
+              - 'set(log.attributes["network.protocol"], ConvertCase(log.attributes["cef_kv"]["app"], "lower")) where log.attributes["cef_kv"]["app"] != nil'
+              - 'set(log.attributes["network.direction"], "outbound") where log.attributes["cef_kv"]["UNIFIdirection"] == "outgoing"'
+              - 'set(log.attributes["network.direction"], "inbound") where log.attributes["cef_kv"]["UNIFIdirection"] == "incoming"'
+              - 'set(log.attributes["network.bytes"], Int(log.attributes["cef_kv"]["UNIFItotalBytes"])) where log.attributes["cef_kv"]["UNIFItotalBytes"] != nil'
+              - 'set(log.attributes["network.packets"], Int(log.attributes["cef_kv"]["UNIFItotalPackets"])) where log.attributes["cef_kv"]["UNIFItotalPackets"] != nil'
+              - 'set(log.attributes["network.name"], log.attributes["cef_kv"]["UNIFInetworkName"]) where log.attributes["cef_kv"]["UNIFInetworkName"] != nil'
+              - 'set(log.attributes["network.vlan.id"], log.attributes["cef_kv"]["UNIFInetworkVlan"]) where log.attributes["cef_kv"]["UNIFInetworkVlan"] != nil'
+              - 'set(log.attributes["rule.name"], log.attributes["cef_kv"]["UNIFIpolicyName"]) where log.attributes["cef_kv"]["UNIFIpolicyName"] != nil'
+              - 'set(log.attributes["rule.ruleset"], log.attributes["cef_kv"]["UNIFIpolicyType"]) where log.attributes["cef_kv"]["UNIFIpolicyType"] != nil'
+              - 'set(log.attributes["observer.ingress.interface.name"], log.attributes["cef_kv"]["deviceInboundInterface"]) where log.attributes["cef_kv"]["deviceInboundInterface"] != nil'
+              - 'set(log.attributes["observer.egress.interface.name"], log.attributes["cef_kv"]["deviceOutboundInterface"]) where log.attributes["cef_kv"]["deviceOutboundInterface"] != nil'
+              - 'set(log.attributes["user.name"], log.attributes["cef_kv"]["UNIFIadmin"]) where log.attributes["cef_kv"]["UNIFIadmin"] != nil'
+              - 'set(log.attributes["related.ip"], [log.attributes["source.ip"], log.attributes["destination.ip"]]) where log.attributes["source.ip"] != nil and log.attributes["destination.ip"] != nil'
+              - 'set(log.attributes["related.ip"], [log.attributes["source.ip"]]) where log.attributes["source.ip"] != nil and log.attributes["destination.ip"] == nil'
+              - 'set(log.attributes["related.ip"], [log.attributes["destination.ip"]]) where log.attributes["source.ip"] == nil and log.attributes["destination.ip"] != nil'
+              - 'set(log.attributes["related.user"], [log.attributes["user.name"]]) where log.attributes["user.name"] != nil'
+              - 'set(log.attributes["related.hosts"], [log.attributes["source.domain"], log.attributes["destination.domain"]]) where log.attributes["source.domain"] != nil and log.attributes["destination.domain"] != nil'
+              - 'set(log.attributes["related.hosts"], [log.attributes["source.domain"]]) where log.attributes["source.domain"] != nil and log.attributes["destination.domain"] == nil'
+              - 'set(log.attributes["related.hosts"], [log.attributes["destination.domain"]]) where log.attributes["source.domain"] == nil and log.attributes["destination.domain"] != nil'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] != nil'
+            statements:
+              - 'set(log.attributes["unifi.action"], log.attributes["cef_kv"]["act"]) where log.attributes["cef_kv"]["act"] != nil'
+              - 'set(log.attributes["unifi.risk"], log.attributes["cef_kv"]["UNIFIrisk"]) where log.attributes["cef_kv"]["UNIFIrisk"] != nil'
+              - 'set(log.attributes["unifi.source.zone"], log.attributes["cef_kv"]["UNIFIsrcZone"]) where log.attributes["cef_kv"]["UNIFIsrcZone"] != nil'
+              - 'set(log.attributes["unifi.destination.zone"], log.attributes["cef_kv"]["UNIFIdstZone"]) where log.attributes["cef_kv"]["UNIFIdstZone"] != nil'
+              - 'set(log.attributes["unifi.client.alias"], log.attributes["cef_kv"]["UNIFIsrcClientAlias"]) where log.attributes["cef_kv"]["UNIFIsrcClientAlias"] != nil'
+              - 'set(log.attributes["unifi.client.alias"], log.attributes["cef_kv"]["UNIFIclientAlias"]) where log.attributes["unifi.client.alias"] == nil and log.attributes["cef_kv"]["UNIFIclientAlias"] != nil'
+              - 'set(log.attributes["unifi.client.model"], log.attributes["cef_kv"]["UNIFIsrcClientModel"]) where log.attributes["cef_kv"]["UNIFIsrcClientModel"] != nil'
+              - 'set(log.attributes["unifi.flow.id"], log.attributes["cef_kv"]["UNIFIflowId"]) where log.attributes["cef_kv"]["UNIFIflowId"] != nil and log.attributes["cef_kv"]["UNIFIflowId"] != "null"'
+              - 'set(log.attributes["unifi.flow.count"], Int(log.attributes["cef_kv"]["UNIFIflowCount"])) where log.attributes["cef_kv"]["UNIFIflowCount"] != nil'
+              - 'set(log.attributes["unifi.network.subnet"], log.attributes["cef_kv"]["UNIFInetworkSubnet"]) where log.attributes["cef_kv"]["UNIFInetworkSubnet"] != nil'
+              - 'set(log.attributes["unifi.link_speed"], log.attributes["cef_kv"]["UNIFIlinkSpeed"]) where log.attributes["cef_kv"]["UNIFIlinkSpeed"] != nil'
+              - 'set(log.attributes["unifi.wifi.ssid"], log.attributes["cef_kv"]["UNIFIwifiName"]) where log.attributes["cef_kv"]["UNIFIwifiName"] != nil'
+              - 'set(log.attributes["unifi.wifi.band"], log.attributes["cef_kv"]["UNIFIwifiBand"]) where log.attributes["cef_kv"]["UNIFIwifiBand"] != nil'
+              - 'set(log.attributes["unifi.wifi.channel"], Int(log.attributes["cef_kv"]["UNIFIwifiChannel"])) where log.attributes["cef_kv"]["UNIFIwifiChannel"] != nil'
+              - 'set(log.attributes["unifi.wifi.channel_width"], Int(log.attributes["cef_kv"]["UNIFIwifiChannelWidth"])) where log.attributes["cef_kv"]["UNIFIwifiChannelWidth"] != nil'
+              - 'set(log.attributes["unifi.wifi.rssi"], Int(log.attributes["cef_kv"]["UNIFIWiFiRssi"])) where log.attributes["cef_kv"]["UNIFIWiFiRssi"] != nil'
+              - 'set(log.attributes["unifi.wifi.airtime_utilization"], Int(log.attributes["cef_kv"]["UNIFIwifiAirtimeUtilization"])) where log.attributes["cef_kv"]["UNIFIwifiAirtimeUtilization"] != nil'
+              - 'set(log.attributes["unifi.wifi.interference"], Int(log.attributes["cef_kv"]["UNIFIwifiInterference"])) where log.attributes["cef_kv"]["UNIFIwifiInterference"] != nil'
+              - 'set(log.attributes["unifi.uplink.name"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceName"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceName"] != nil'
+              - 'set(log.attributes["unifi.uplink.ip"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceIp"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceIp"] != nil'
+              - 'set(log.attributes["unifi.uplink.mac"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceMac"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceMac"] != nil'
+              - 'set(log.attributes["unifi.uplink.model"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceModel"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceModel"] != nil'
+              - 'set(log.attributes["unifi.uplink.version"], log.attributes["cef_kv"]["UNIFIconnectedToDeviceVersion"]) where log.attributes["cef_kv"]["UNIFIconnectedToDeviceVersion"] != nil'
+              - 'set(log.attributes["unifi.uplink.port"], Int(log.attributes["cef_kv"]["UNIFIconnectedToDevicePort"])) where log.attributes["cef_kv"]["UNIFIconnectedToDevicePort"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.name"], log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceName"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceName"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.ip"], log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceIp"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceIp"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.mac"], log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceMac"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceMac"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.model"], log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceModel"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceModel"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.version"], log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceVersion"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToDeviceVersion"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.port"], Int(log.attributes["cef_kv"]["UNIFIlastConnectedToDevicePort"])) where log.attributes["cef_kv"]["UNIFIlastConnectedToDevicePort"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.rssi"], Int(log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiRssi"])) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiRssi"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.channel"], Int(log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannel"])) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannel"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.channel_width"], Int(log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannelWidth"])) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiChannelWidth"] != nil'
+              - 'set(log.attributes["unifi.previous_uplink.band"], log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiBand"]) where log.attributes["cef_kv"]["UNIFIlastConnectedToWiFiBand"] != nil'
+              - 'set(log.attributes["unifi.session.duration"], log.attributes["cef_kv"]["UNIFIduration"]) where log.attributes["cef_kv"]["UNIFIduration"] != nil'
+              - 'set(log.attributes["unifi.session.usage_up"], log.attributes["cef_kv"]["UNIFIusageUp"]) where log.attributes["cef_kv"]["UNIFIusageUp"] != nil'
+              - 'set(log.attributes["unifi.session.usage_down"], log.attributes["cef_kv"]["UNIFIusageDown"]) where log.attributes["cef_kv"]["UNIFIusageDown"] != nil'
+              - 'set(log.attributes["unifi.access_method"], log.attributes["cef_kv"]["UNIFIaccessMethod"]) where log.attributes["cef_kv"]["UNIFIaccessMethod"] != nil'
+              - 'set(log.attributes["unifi.settings.section"], log.attributes["cef_kv"]["UNIFIsettingsSection"]) where log.attributes["cef_kv"]["UNIFIsettingsSection"] != nil'
+              - 'set(log.attributes["unifi.settings.entry"], log.attributes["cef_kv"]["UNIFIsettingsEntry"]) where log.attributes["cef_kv"]["UNIFIsettingsEntry"] != nil'
+              - 'set(log.attributes["unifi.settings.changes"], log.attributes["cef_kv"]["UNIFIsettingsChanges"]) where log.attributes["cef_kv"]["UNIFIsettingsChanges"] != nil'
+              - 'set(log.attributes["observer.ip"], log.attributes["cef_kv"]["UNIFIdeviceIp"]) where log.attributes["cef_kv"]["UNIFIdeviceIp"] != nil'
+              - 'set(log.attributes["observer.mac"], log.attributes["cef_kv"]["UNIFIdeviceMac"]) where log.attributes["cef_kv"]["UNIFIdeviceMac"] != nil'
+              - 'set(log.attributes["unifi.device.model"], log.attributes["cef_kv"]["UNIFIdeviceModel"]) where log.attributes["cef_kv"]["UNIFIdeviceModel"] != nil'
+              - 'set(log.attributes["unifi.device.version"], log.attributes["cef_kv"]["UNIFIdeviceVersion"]) where log.attributes["cef_kv"]["UNIFIdeviceVersion"] != nil'
+      transform/device_syslog:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] == nil and attributes["message"] != nil and IsMatch(attributes["message"], "^(?:\\S+\\s+)*?[A-Za-z0-9_./-]+(?:\\[[0-9]+\\])?:\\s")'
+            statements:
+              - 'merge_maps(log.attributes, ExtractPatterns(log.attributes["message"], "^(?:\\S+\\s+)*?(?P<dev_tag>[A-Za-z0-9_./-]+)(?:\\[(?P<dev_pid>[0-9]+)\\])?:\\s+(?P<dev_msg>.*)$"), "upsert")'
+              - 'set(log.attributes["process.executable"], log.attributes["dev_tag"]) where IsMatch(log.attributes["dev_tag"], "^/")'
+              - 'set(log.attributes["process.name"], log.attributes["dev_tag"])'
+              - 'replace_pattern(log.attributes["process.name"], "^.*/", "")'
+              - 'set(log.attributes["process.pid"], Int(log.attributes["dev_pid"])) where log.attributes["dev_pid"] != nil and log.attributes["dev_pid"] != ""'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["dev_msg"] != nil'
+            statements:
+              - 'set(log.attributes["event.original"], log.body) where IsString(log.body)'
+              - 'set(log.body, log.attributes["dev_msg"])'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] == "coredns" and IsMatch(log.body, "^\\{")'
+            statements:
+              - 'set(log.attributes["dns_kv"], ParseJSON(log.body))'
+          - context: log
+            conditions:
+              - 'attributes["dns_kv"] != nil'
+            statements:
+              - 'set(log.attributes["event.dataset"], "unifi.dns")'
+              - 'set(log.attributes["event.category"], ["network"])'
+              - 'set(log.attributes["event.type"], ["connection", "denied"])'
+              - 'set(log.attributes["event.outcome"], "success")'
+              - 'set(log.attributes["unifi.block_type"], log.attributes["dns_kv"]["type"]) where log.attributes["dns_kv"]["type"] != nil'
+              - 'set(log.attributes["event.action"], "dns_blocked")'
+              - 'set(log.attributes["event.action"], "dns_ad_blocked") where log.attributes["dns_kv"]["type"] == "dnsAdBlock"'
+              - 'set(log.attributes["event.action"], "dns_content_filtered") where log.attributes["dns_kv"]["type"] == "contentFilteringBlock"'
+              - 'set(log.attributes["rule.category"], log.attributes["dns_kv"]["category"]) where log.attributes["dns_kv"]["category"] != nil'
+              - 'set(log.attributes["dns.question.name"], log.attributes["dns_kv"]["domain"]) where log.attributes["dns_kv"]["domain"] != nil'
+              - 'set(log.attributes["source.ip"], log.attributes["dns_kv"]["src_ip"]) where log.attributes["dns_kv"]["src_ip"] != nil'
+              - 'set(log.attributes["source.ip"], log.attributes["dns_kv"]["ip"]) where log.attributes["source.ip"] == nil and log.attributes["dns_kv"]["ip"] != nil'
+              - 'set(log.attributes["source.port"], Int(log.attributes["dns_kv"]["src_port"])) where log.attributes["dns_kv"]["src_port"] != nil'
+              - 'set(log.attributes["source.mac"], log.attributes["dns_kv"]["mac"]) where log.attributes["dns_kv"]["mac"] != nil'
+              - 'set(log.attributes["destination.ip"], log.attributes["dns_kv"]["dst_ip"]) where log.attributes["dns_kv"]["dst_ip"] != nil'
+              - 'set(log.attributes["destination.port"], Int(log.attributes["dns_kv"]["dst_port"])) where log.attributes["dns_kv"]["dst_port"] != nil'
+              - 'set(log.attributes["network.transport"], ConvertCase(log.attributes["dns_kv"]["protocol"], "lower")) where log.attributes["dns_kv"]["protocol"] != nil'
+              - 'set(log.attributes["network.protocol"], "dns")'
+              - 'set(log.attributes["source.address"], log.attributes["source.ip"]) where log.attributes["source.ip"] != nil'
+              - 'set(log.attributes["destination.address"], log.attributes["destination.ip"]) where log.attributes["destination.ip"] != nil'
+              - 'set(log.attributes["related.ip"], [log.attributes["source.ip"]]) where log.attributes["source.ip"] != nil'
+              - 'set(log.attributes["related.hosts"], [log.attributes["dns.question.name"]]) where log.attributes["dns.question.name"] != nil'
+              - 'set(log.time_unix_nano, Int(log.attributes["dns_kv"]["unix_milli_timestamp"]) * 1000000) where log.attributes["dns_kv"]["unix_milli_timestamp"] != nil'
+              - 'set(log.body, Concat(["blocked DNS query for ", log.attributes["dns.question.name"], " (", log.attributes["rule.category"], ")"], "")) where log.attributes["dns.question.name"] != nil and log.attributes["rule.category"] != nil'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] == "dnsmasq-dhcp" and IsMatch(log.body, "^DHCP[A-Z]+\\([^)]+\\)\\s")'
+            statements:
+              - 'merge_maps(log.attributes, ExtractPatterns(log.body, "^(?P<dhcp_type>DHCP[A-Z]+)\\((?P<dhcp_iface>[^)]+)\\)\\s+(?:(?P<dhcp_ip>[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)\\s+)?(?P<dhcp_mac>[0-9a-fA-F:]{17})(?:\\s+(?P<dhcp_host>\\S+))?"), "upsert")'
+              - 'set(log.attributes["event.dataset"], "unifi.dhcp")'
+              - 'set(log.attributes["event.category"], ["network"])'
+              - 'set(log.attributes["event.type"], ["protocol"])'
+              - 'set(log.attributes["network.protocol"], "dhcp")'
+              - 'set(log.attributes["network.transport"], "udp")'
+              - 'set(log.attributes["event.action"], log.attributes["dhcp_type"])'
+              - 'replace_pattern(log.attributes["event.action"], "^DHCP", "dhcp_")'
+              - 'set(log.attributes["event.action"], ConvertCase(log.attributes["event.action"], "lower"))'
+              - 'set(log.attributes["source.mac"], log.attributes["dhcp_mac"]) where log.attributes["dhcp_mac"] != nil and log.attributes["dhcp_mac"] != ""'
+              - 'set(log.attributes["source.ip"], log.attributes["dhcp_ip"]) where log.attributes["dhcp_ip"] != nil and log.attributes["dhcp_ip"] != ""'
+              - 'set(log.attributes["source.address"], log.attributes["source.ip"]) where log.attributes["source.ip"] != nil'
+              - 'set(log.attributes["source.domain"], log.attributes["dhcp_host"]) where log.attributes["dhcp_host"] != nil and log.attributes["dhcp_host"] != ""'
+              - 'set(log.attributes["observer.ingress.interface.name"], log.attributes["dhcp_iface"]) where log.attributes["dhcp_iface"] != nil and log.attributes["dhcp_iface"] != ""'
+              - 'set(log.attributes["related.ip"], [log.attributes["source.ip"]]) where log.attributes["source.ip"] != nil'
+              - 'set(log.attributes["related.hosts"], [log.attributes["source.domain"]]) where log.attributes["source.domain"] != nil'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] == "sudo"'
+            statements:
+              - 'set(log.attributes["event.dataset"], "unifi.sudo")'
+              - 'set(log.attributes["event.category"], ["process"])'
+              - 'set(log.attributes["event.type"], ["start"])'
+              - 'set(log.attributes["event.action"], "sudo_command")'
+              - 'merge_maps(log.attributes, ExtractPatterns(log.body, "^\\s*(?P<sudo_user>\\S+)\\s+:\\s+(?:.*?;\\s*)?PWD=(?P<sudo_pwd>\\S+)\\s*;\\s*USER=(?P<sudo_target>\\S+)\\s*;\\s*COMMAND=(?P<sudo_cmd>.*)$"), "upsert") where IsMatch(log.body, "^\\s*\\S+\\s+:\\s+(?:.*?;\\s*)?PWD=\\S+\\s*;\\s*USER=\\S+\\s*;\\s*COMMAND=")'
+              - 'set(log.attributes["user.name"], log.attributes["sudo_user"]) where log.attributes["sudo_user"] != nil'
+              - 'set(log.attributes["user.effective.name"], log.attributes["sudo_target"]) where log.attributes["sudo_target"] != nil'
+              - 'set(log.attributes["process.working_directory"], log.attributes["sudo_pwd"]) where log.attributes["sudo_pwd"] != nil'
+              - 'set(log.attributes["process.command_line"], log.attributes["sudo_cmd"]) where log.attributes["sudo_cmd"] != nil'
+              - 'set(log.attributes["related.user"], [log.attributes["sudo_user"], log.attributes["sudo_target"]]) where log.attributes["sudo_user"] != nil and log.attributes["sudo_target"] != nil'
+              - 'set(log.attributes["event.outcome"], "failure") where IsMatch(log.body, "incorrect password attempts|NOT in the sudoers|authentication failure|user NOT authorized|command not allowed")'
+              - 'set(log.attributes["event.action"], "sudo_auth_failure") where log.attributes["event.outcome"] == "failure"'
+              - 'set(log.attributes["event.outcome"], "success") where log.attributes["event.outcome"] == nil and log.attributes["sudo_cmd"] != nil'
+              - 'merge_maps(log.attributes, ExtractPatterns(log.body, "\\suser=(?P<sudo_pam_user>\\S+)\\s*$"), "upsert") where log.attributes["user.name"] == nil and IsMatch(log.body, "\\suser=\\S+\\s*$")'
+              - 'set(log.attributes["user.name"], log.attributes["sudo_pam_user"]) where log.attributes["sudo_pam_user"] != nil'
+              - 'set(log.attributes["related.user"], [log.attributes["sudo_pam_user"]]) where log.attributes["related.user"] == nil and log.attributes["sudo_pam_user"] != nil'
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["event.dataset"] == "unifi.syslog"'
+            statements:
+              - 'set(log.attributes["event.dataset"], "unifi.system")'
+      transform/strip_working_fields:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - 'delete_matching_keys(log.attributes, "^(cef_|dev_|dns_kv$|dhcp_|sudo_|hostname$|appname$|facility$|facility_text$|priority$|message$|version$|proc_id$|msg_id$|structured_data$)")'
+      transform/tag_parse_failures:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - 'set(log.attributes["unifi.parse_failure"], "syslog_header") where log.attributes["message"] == nil'
+              - 'set(log.attributes["unifi.parse_failure"], "cef_envelope") where log.attributes["message"] != nil and IsMatch(log.attributes["message"], "CEF:\\d+\\|") and log.attributes["cef_name"] == nil'
+              - 'set(log.attributes["unifi.parse_failure"], "cef_extensions") where log.attributes["cef_extensions"] != nil and log.attributes["cef_kv"] == nil'
+      transform/tag_mapping_failures:
+        error_mode: ignore
+        log_statements:
+          - context: log
+            statements:
+              - 'set(log.attributes["unifi.parse_failure"], "ecs_mapping") where log.attributes["cef_kv"] != nil and log.attributes["event.dataset"] == nil'
+      transform/timestamp_guard:
+        log_statements:
+          - set(log.time_unix_nano, log.observed_time_unix_nano) where log.time_unix_nano == 0
+      resource/unifi:
+        attributes:
+          - key: service.name
+            value: unifi-udm
+            action: upsert
+          - key: observed.source
+            value: unifi-otel
+            action: upsert
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    exporters:
+      otlp_grpc/gateway:
+        endpoint: ${env:OTLP_GATEWAY_ENDPOINT:-otel-gateway.observability.svc.cluster.local:4317}
+        tls:
+          insecure: true
+      debug/parse_failures:
+        verbosity: detailed
+    connectors:
+      routing/parse_failures:
+        default_pipelines: [logs/unifi_syslog_export]
+        table:
+          - context: log
+            condition: 'log.attributes["unifi.parse_failure"] != nil'
+            pipelines: [logs/unifi_parse_failures]
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+      pipelines:
+        logs/unifi_syslog:
+          receivers: [syslog/unifi_udp, syslog/unifi_tcp]
+          processors:
+            - memory_limiter
+            - transform/cef_extensions
+            - transform/tag_parse_failures
+            - transform/unifi_ecs
+            - transform/device_syslog
+            - transform/tag_mapping_failures
+            - transform/strip_working_fields
+          exporters: [routing/parse_failures]
+        logs/unifi_syslog_export:
+          receivers: [routing/parse_failures]
+          processors:
+            - transform/timestamp_guard
+            - resource/unifi
+            - batch
+          exporters: [otlp_grpc/gateway]
+        logs/unifi_parse_failures:
+          receivers: [routing/parse_failures]
+          processors:
+            - transform/timestamp_guard
+            - resource/unifi
+            - batch
+          exporters: [otlp_grpc/gateway, debug/parse_failures]

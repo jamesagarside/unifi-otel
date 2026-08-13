@@ -1,0 +1,54 @@
+{{- $otel := index .Values "opentelemetry-collector" -}}
+{{- $svc := $otel.service | default dict -}}
+{{- $env := $otel.extraEnvs | default list -}}
+{{- $names := list -}}
+{{- range $env }}{{ $names = append $names .name }}{{ end -}}
+{{- $cfg := $otel.alternateConfig | default dict -}}
+{{- $snmp := hasKey ($cfg.receivers | default dict) "snmp/unifi" -}}
+
+unifi-otel {{ .Chart.Version }} installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Point the UniFi console's syslog / SIEM Server at this Service:
+
+  service   {{ .Release.Name }}-opentelemetry-collector ({{ $svc.type | default "ClusterIP" }})
+  udp/514   RFC3164, forwarded to container port 5514
+  tcp/601   RFC5424, forwarded to container port 6601
+{{ if eq ($svc.type | default "ClusterIP") "ClusterIP" }}
+  NOTE: the Service is ClusterIP, so nothing outside the cluster can reach
+  it. A UniFi console sends to a fixed address; set service.type to
+  LoadBalancer (or NodePort) and give it an address your network can
+  route to. Which controller supplies that address, and any annotation it
+  needs, are your values - see docs/helm.md.
+{{ end }}
+Exporting to: {{ if has "OTLP_GATEWAY_ENDPOINT" $names }}{{ range $env }}{{ if eq .name "OTLP_GATEWAY_ENDPOINT" }}{{ .value | default "(from valueFrom)" }}{{ end }}{{ end }}{{ else }}the alternateConfig default - OTLP_GATEWAY_ENDPOINT is not set in extraEnvs{{ end }}
+{{ if not (has "UNIFI_SYSLOG_TIMEZONE" $names) }}
+  WARNING: UNIFI_SYSLOG_TIMEZONE is not set in extraEnvs, so the syslog
+  receiver falls back to Etc/UTC. The console stamps RFC3164 syslog in
+  LOCAL time with no offset. If it is not running on UTC, every non-CEF
+  record will land a whole number of hours out, with no error logged.
+{{ end }}
+{{- if $snmp }}
+SNMP polling is ENABLED.
+{{- if not $otel.extraEnvsFrom }}
+{{- if not (and (has "UNIFI_SNMP_USER" $names) (has "UNIFI_SNMP_PASSWORD" $names)) }}
+
+  WARNING: UNIFI_SNMP_USER / UNIFI_SNMP_PASSWORD were not found in
+  extraEnvs and no extraEnvsFrom source is set. Those variables have no
+  default, so the collector will fail config validation and CrashLoopBackOff.
+{{- end }}
+{{- end }}
+{{- if not (has "UNIFI_HOST" $names) }}
+
+  NOTE: UNIFI_HOST is not set, so polling goes to 192.0.2.1 (TEST-NET-1)
+  and nothing will be collected.
+{{- end }}
+{{- end }}
+
+Check it is running:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ .Release.Name }}-opentelemetry-collector
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ .Release.Name }}-opentelemetry-collector
+
+Records that fail a parsing stage are tagged unifi.parse_failure and
+printed in full by the debug exporter, so the container log shows what
+failed without a round trip to your backend.

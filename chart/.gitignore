@@ -1,0 +1,3 @@
+# Pulled by `helm dependency build`, which CI runs from the committed
+# Chart.lock. The upstream tarball is not vendored.
+charts/

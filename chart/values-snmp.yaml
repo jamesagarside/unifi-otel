@@ -1,0 +1,269 @@
+# ─────────────────────────────────────────────────────────────────────
+# OPTIONAL MODULE — SNMP polling. Off unless you pass this file.
+#
+#   helm install unifi-otel unifi-otel/unifi-otel \
+#     -f values-snmp.yaml \
+#     -f my-values.yaml
+#
+# On a host, SNMP is enabled by appending three more --config flags to the
+# default four. Helm's values merge is the same operation: this overlay
+# adds map keys under alternateConfig and touches nothing that is already
+# there, so `receivers`, `processors` and `service.pipelines` gain entries
+# and the log pipeline is untouched.
+#
+# Pass it BEFORE your own values file. Helm merges -f files left to right
+# with later files winning, and lists REPLACE rather than merge, so your
+# own extraEnvs must come last or it will be the one that gets discarded.
+#
+# ── Anchors ──────────────────────────────────────────────────────────
+# The SNMP module leans on YAML anchors heavily — the slow receiver
+# aliases nine values from the fast one. Anchors do not cross --config
+# files on the host, and they do not cross values files here either: a
+# values file is one YAML document, resolved before Helm merges anything.
+# Every anchor below is therefore defined and consumed within THIS file,
+# which is the same constraint collector/optional/snmp/15-receivers-snmp.yaml
+# already works under. Do not add an alias here to an anchor defined in
+# values.yaml; it will not resolve.
+#
+# ── Credentials ──────────────────────────────────────────────────────
+# UNIFI_SNMP_USER and UNIFI_SNMP_PASSWORD have no defaults, on purpose:
+# with SNMP enabled and those variables unset the collector fails config
+# validation instead of starting up and quietly polling nothing.
+#
+# Supply them from an existing Secret rather than as plaintext values —
+# see docs/helm.md. UNIFI_HOST defaults to 192.0.2.1 (TEST-NET-1,
+# guaranteed unroutable), so polling goes nowhere until you set it.
+#
+#   opentelemetry-collector:
+#     extraEnvs:
+#       - name: OTLP_GATEWAY_ENDPOINT
+#         value: "otel-gateway.observability.svc.cluster.local:4317"
+#       - name: UNIFI_SYSLOG_TIMEZONE
+#         value: "Europe/London"
+#       - name: UNIFI_HOST
+#         value: "198.51.100.1"
+#     extraEnvsFrom:
+#       - secretRef:
+#           name: unifi-snmp   # keys: UNIFI_SNMP_USER, UNIFI_SNMP_PASSWORD
+#
+# SNMP reaches the console only — adopted APs and switches serve no SNMP
+# agent of their own — and it is not covered by CI. Read docs/snmp.md
+# before enabling it.
+# ─────────────────────────────────────────────────────────────────────
+
+opentelemetry-collector:
+  # collector/optional/snmp/15-receivers-snmp.yaml,
+  # 30-processors-metrics.yaml and 91-service-metrics.yaml, deep-merged.
+  # Annotated originals live in collector/optional/snmp/.
+  alternateConfig:
+    receivers:
+      snmp/unifi:
+        collection_interval: 60s
+        endpoint: &snmp_endpoint udp://${env:UNIFI_HOST:-192.0.2.1}:161
+        version: &snmp_version v3
+        security_level: &snmp_security_level auth_priv
+        user: &snmp_user ${env:UNIFI_SNMP_USER}
+        auth_type: &snmp_auth_type SHA
+        auth_password: &snmp_auth_password ${env:UNIFI_SNMP_PASSWORD}
+        privacy_type: &snmp_privacy_type AES
+        privacy_password: &snmp_privacy_password ${env:UNIFI_SNMP_PASSWORD}
+        resource_attributes: &snmp_resource_attributes
+          host.name:
+            scalar_oid: "1.3.6.1.2.1.1.5.0"
+            description: SNMP sysName of the polled device
+        attributes: &snmp_interface_attributes
+          network.interface.name:
+            oid: "1.3.6.1.2.1.31.1.1.1.1"
+            description: Interface name as reported by IF-MIB (OTel semconv)
+          interface.name:
+            oid: "1.3.6.1.2.1.31.1.1.1.1"
+            description: Interface name as reported by IF-MIB (ECS)
+          network.io.direction:
+            enum: [receive, transmit]
+            description: Direction of the counter, per OTel semconv
+          cpu.mode:
+            enum: [user, system, idle, iowait]
+            description: Which CPU tick counter this datapoint came from
+          system.memory.state:
+            enum: [free]
+            description: Which portion of memory this datapoint measures
+        metrics:
+          system.network.io:
+            unit: "By"
+            sum: &counter
+              monotonic: true
+              value_type: int
+              aggregation: cumulative
+            column_oids:
+              - oid: "1.3.6.1.2.1.31.1.1.1.6"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                  - {name: network.io.direction, value: receive}
+                resource_attributes: [host.name]
+              - oid: "1.3.6.1.2.1.31.1.1.1.10"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                  - {name: network.io.direction, value: transmit}
+                resource_attributes: [host.name]
+          unifi.interface.operational.status:
+            unit: "{status}"
+            gauge:
+              value_type: int
+            column_oids:
+              - oid: "1.3.6.1.2.1.2.2.1.8"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                resource_attributes: [host.name]
+          system.cpu.time:
+            unit: "s"
+            sum:
+              monotonic: true
+              value_type: double
+              aggregation: cumulative
+            scalar_oids:
+              - oid: "1.3.6.1.4.1.2021.11.50.0"
+                attributes: [{name: cpu.mode, value: user}]
+                resource_attributes: [host.name]
+              - oid: "1.3.6.1.4.1.2021.11.52.0"
+                attributes: [{name: cpu.mode, value: system}]
+                resource_attributes: [host.name]
+              - oid: "1.3.6.1.4.1.2021.11.53.0"
+                attributes: [{name: cpu.mode, value: idle}]
+                resource_attributes: [host.name]
+              - oid: "1.3.6.1.4.1.2021.11.54.0"
+                attributes: [{name: cpu.mode, value: iowait}]
+                resource_attributes: [host.name]
+          system.cpu.load_average.1m:
+            unit: "1"
+            gauge: &load_gauge
+              value_type: double
+            scalar_oids:
+              - oid: "1.3.6.1.4.1.2021.10.1.5.1"
+                resource_attributes: [host.name]
+          system.cpu.load_average.5m:
+            unit: "1"
+            gauge: *load_gauge
+            scalar_oids:
+              - oid: "1.3.6.1.4.1.2021.10.1.5.2"
+                resource_attributes: [host.name]
+          system.cpu.load_average.15m:
+            unit: "1"
+            gauge: *load_gauge
+            scalar_oids:
+              - oid: "1.3.6.1.4.1.2021.10.1.5.3"
+                resource_attributes: [host.name]
+          system.memory.limit:
+            unit: "By"
+            gauge:
+              value_type: int
+            scalar_oids:
+              - oid: "1.3.6.1.4.1.2021.4.5.0"
+                resource_attributes: [host.name]
+          system.memory.usage:
+            unit: "By"
+            gauge:
+              value_type: int
+            scalar_oids:
+              - oid: "1.3.6.1.4.1.2021.4.6.0"
+                attributes: [{name: system.memory.state, value: free}]
+                resource_attributes: [host.name]
+          system.uptime:
+            unit: "s"
+            gauge:
+              value_type: double
+            scalar_oids:
+              - oid: "1.3.6.1.2.1.1.3.0"
+                resource_attributes: [host.name]
+      snmp/unifi_slow:
+        collection_interval: 300s
+        endpoint: *snmp_endpoint
+        version: *snmp_version
+        security_level: *snmp_security_level
+        user: *snmp_user
+        auth_type: *snmp_auth_type
+        auth_password: *snmp_auth_password
+        privacy_type: *snmp_privacy_type
+        privacy_password: *snmp_privacy_password
+        resource_attributes: *snmp_resource_attributes
+        attributes: *snmp_interface_attributes
+        metrics:
+          system.network.errors:
+            unit: "{error}"
+            sum: *counter
+            column_oids:
+              - oid: "1.3.6.1.2.1.2.2.1.14"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                  - {name: network.io.direction, value: receive}
+                resource_attributes: [host.name]
+              - oid: "1.3.6.1.2.1.2.2.1.20"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                  - {name: network.io.direction, value: transmit}
+                resource_attributes: [host.name]
+          system.network.packet.dropped:
+            unit: "{packet}"
+            sum: *counter
+            column_oids:
+              - oid: "1.3.6.1.2.1.2.2.1.13"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                  - {name: network.io.direction, value: receive}
+                resource_attributes: [host.name]
+              - oid: "1.3.6.1.2.1.2.2.1.19"
+                attributes:
+                  - {name: network.interface.name}
+                  - {name: interface.name}
+                  - {name: network.io.direction, value: transmit}
+                resource_attributes: [host.name]
+    processors:
+      filter/dead_interfaces:
+        metrics:
+          datapoint:
+            - attributes["network.interface.name"] != nil and IsMatch(attributes["network.interface.name"], "^(lo|dummy0|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|sit0|ip6tnl0|ifb[01])$")
+      transform/snmp_units:
+        error_mode: ignore
+        metric_statements:
+          - 'set(datapoint.value_double, datapoint.value_double / 100) where metric.name == "system.cpu.time"'
+          - 'set(datapoint.value_double, datapoint.value_double / 100) where metric.name == "system.uptime"'
+          - 'set(datapoint.value_double, datapoint.value_double / 100) where IsMatch(metric.name, "^system\\.cpu\\.load_average\\.")'
+          - 'set(datapoint.value_int, datapoint.value_int * 1024) where metric.name == "system.memory.limit"'
+          - 'set(datapoint.value_int, datapoint.value_int * 1024) where metric.name == "system.memory.usage"'
+      metricsgeneration/memory_utilization:
+        rules:
+          - name: system.memory.utilization
+            unit: "1"
+            type: calculate
+            metric1: system.memory.usage
+            metric2: system.memory.limit
+            operation: divide
+      transform/memory_utilization_invert:
+        error_mode: ignore
+        metric_statements:
+          - 'set(datapoint.value_double, 1 - datapoint.value_double) where metric.name == "system.memory.utilization"'
+          - 'delete_key(datapoint.attributes, "system.memory.state") where metric.name == "system.memory.utilization"'
+      cumulative_to_delta/cpu:
+        include:
+          metrics: [system.cpu.time]
+          match_type: strict
+        initial_value: drop
+    service:
+      pipelines:
+        metrics/unifi_snmp:
+          receivers: [snmp/unifi, snmp/unifi_slow]
+          processors:
+            - memory_limiter
+            - filter/dead_interfaces
+            - transform/snmp_units
+            - metricsgeneration/memory_utilization
+            - transform/memory_utilization_invert
+            - cumulative_to_delta/cpu
+            - resource/unifi
+            - batch
+          exporters: [otlp_grpc/gateway]
