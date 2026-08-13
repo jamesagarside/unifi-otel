@@ -40,6 +40,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -121,6 +122,20 @@ def validate(snippet: str, image: str) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as td:
         cfg = Path(td) / "snippet.yaml"
         cfg.write_text(snippet)
+        # tempfile creates the directory 0700 owned by the current user.
+        # The contrib image runs as uid 10001, so on Linux it cannot
+        # traverse the mount and every snippet fails with "permission
+        # denied" -- which reads exactly like a broken snippet.
+        #
+        # This does NOT reproduce on macOS: Docker Desktop's filesystem
+        # mapping hides the uid mismatch, so the check passes locally and
+        # fails on every CI runner. Found precisely that way.
+        #
+        # 0755/0644 is safe here: the content is a documentation snippet
+        # already public in the repo, and the directory is discarded on
+        # exit.
+        os.chmod(td, 0o755)
+        os.chmod(cfg, 0o644)
         env_args = []
         for var in referenced_env(snippet):
             env_args += ["-e", f"{var}=ci-not-a-real-secret"]
