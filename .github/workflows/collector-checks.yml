@@ -198,6 +198,89 @@ jobs:
         run: |
           echo "::warning::otelcol validate failed against ${IMAGE}. Soft-fail is on, so this job is green; the calling workflow reports it."
 
+  # ── Corpus: replay real frames, diff against goldens ───────────────
+  # This is the check that makes the parsing claims credible. The other
+  # jobs prove the config PARSES; this one proves it parses CORRECTLY.
+  #
+  # The privacy gate runs FIRST and is fatal. It is cheap, and the thing
+  # it prevents - a real capture reaching a public branch - is the one
+  # failure here that cannot be undone by a follow-up commit.
+  #
+  # Gate the corpus only, never tests/golden/. Goldens are full of ECS
+  # field names like event.dataset, which the scrubber cannot tell apart
+  # from domain names, so pointing it at the goldens is guaranteed noise.
+  corpus:
+    name: corpus replay + privacy gate
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.checks.outputs.result }}
+    env:
+      IMAGE: otel/opentelemetry-collector-contrib:${{ inputs.collector-version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pull collector image
+        run: docker pull "$IMAGE"
+
+      - name: Corpus privacy gate and golden replay
+        id: checks
+        run: |
+          set -uo pipefail
+          failed=0
+
+          # `|| rc=$?` throughout: this step must survive a non-zero exit
+          # long enough to report WHICH check failed. See the note in the
+          # validate job.
+          echo "::group::privacy gate — scrub.py --check"
+          rc=0
+          gate=$(python3 scripts/scrub.py --check tests/corpus/*.txt 2>&1) || rc=$?
+          echo "$gate"
+          echo "::endgroup::"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::corpus privacy gate failed — a frame under tests/corpus/ looks unscrubbed. Do NOT merge; scrub it with scripts/scrub.py before pushing again."
+            failed=1
+          fi
+
+          # --image so the matrix cell tests the version it was asked to.
+          # Left to itself the harness reads the pin from docker-compose,
+          # which would silently test 0.157.0 in every cell.
+          echo "::group::corpus replay — ${IMAGE}"
+          rc=0
+          python3 tests/run.py --image "$IMAGE" || rc=$?
+          echo "::endgroup::"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::corpus replay failed against ${IMAGE}. If the parsing change was intentional, regenerate with 'python3 tests/run.py --update' and review the golden diff in the PR - that diff IS the behaviour change."
+            failed=1
+          fi
+
+          {
+            echo "## corpus replay — \`${IMAGE}\`"
+            echo
+            if [ "$failed" -eq 0 ]; then
+              echo "Privacy gate and golden replay both passed."
+            else
+              echo "See the job log; the harness prints per-bar results."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$failed" -eq 0 ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verdict
+        if: ${{ !inputs.soft-fail }}
+        env:
+          RESULT: ${{ steps.checks.outputs.result }}
+        run: |
+          [ "$RESULT" = "ok" ] || exit 1
+
+      - name: Verdict (soft-fail)
+        if: ${{ inputs.soft-fail && steps.checks.outputs.result != 'ok' }}
+        run: |
+          echo "::warning::corpus replay failed against ${IMAGE}. Soft-fail is on, so this job is green; the calling workflow reports it."
+
   # ── Chart: structure, then the config inside the structure ─────────
   chart:
     name: helm lint/template/kubeconform + drift
@@ -419,7 +502,7 @@ jobs:
   verdict:
     name: verdict
     runs-on: ubuntu-latest
-    needs: [config, chart]
+    needs: [config, corpus, chart]
     if: always()
     outputs:
       result: ${{ steps.aggregate.outputs.result }}
@@ -428,11 +511,17 @@ jobs:
         id: aggregate
         env:
           CONFIG_RESULT: ${{ needs.config.outputs.result }}
+          CORPUS_RESULT: ${{ needs.corpus.outputs.result }}
           CHART_RESULT: ${{ needs.chart.outputs.result }}
         run: |
           set -uo pipefail
-          echo "config=${CONFIG_RESULT:-skipped} chart=${CHART_RESULT:-skipped}"
-          if [ "${CONFIG_RESULT:-}" = "ok" ] && [ "${CHART_RESULT:-}" = "ok" ]; then
+          echo "config=${CONFIG_RESULT:-skipped} corpus=${CORPUS_RESULT:-skipped} chart=${CHART_RESULT:-skipped}"
+          # A skipped or crashed job leaves its output empty, which must
+          # NOT read as success - hence testing for "ok" rather than for
+          # the absence of "failed".
+          if [ "${CONFIG_RESULT:-}" = "ok" ] \
+             && [ "${CORPUS_RESULT:-}" = "ok" ] \
+             && [ "${CHART_RESULT:-}" = "ok" ]; then
             echo "result=ok" >> "$GITHUB_OUTPUT"
           else
             echo "result=failed" >> "$GITHUB_OUTPUT"
