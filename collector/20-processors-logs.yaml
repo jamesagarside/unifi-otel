@@ -342,31 +342,79 @@ processors:
   transform/device_syslog:
     error_mode: ignore
     log_statements:
-      # ---- 1. process.name / process.pid / process.executable --------
-      # The doubled hostname is eaten by a LAZY (?:\S+\s+)*? prefix rather
-      # than a fixed \S+\s+. Lazy matters: it tries zero repetitions
-      # first, so a device that does NOT double its hostname still parses
-      # (a fixed prefix would swallow the real tag and call the first word
-      # of the message a process). Verified both ways by replay.
+      # ---- 1. split the frame, then recover the process tag -----------
+      # Two separate jobs, deliberately kept apart. Do not re-merge them:
+      # that merge WAS the bug in issue #24.
       #
-      # Scoped to process.name == nil so the appname rule in
-      # transform/unifi_ecs wins wherever the syslog parser got it right.
+      #   1a  ALWAYS set dev_msg, on every device frame. Section 2 keys
+      #       off dev_msg to move the raw frame into event.original and
+      #       the human-readable half into body, and sections 3-5 all
+      #       match on body. Leave dev_msg unset and body still holds the
+      #       whole frame — PRI, timestamp, hostname and tag included — so
+      #       every downstream pattern matches the wrong string. Nothing
+      #       raises and nothing lands in the failure pipeline; the fields
+      #       are just silently absent.
+      #
+      #   1b  Recover process.name ONLY where the syslog parser could not.
+      #       Scoping THIS to process.name == nil is right: the appname
+      #       rule in transform/unifi_ecs is the correct source wherever
+      #       RFC3164 found a tag, and device_syslog must defer to it.
+      #       Scoping 1a to it as well is what broke every device that
+      #       does not double its hostname.
+      #
+      # 1a is a plain copy of `message`, because the syslog parser has
+      # already removed the header and — where it found one — the tag, so
+      # `message` IS the human-readable half. A copy cannot raise, so it
+      # is safe to run unconditionally.
+      #
+      # 1b only has work to do on a frame the parser could NOT split,
+      # which in practice means the UDM's DOUBLED hostname:
+      #   <13>… Gateway Gateway coredns[4155]: {…}
+      # The parser consumes the first hostname, cannot make a tag of the
+      # second (no colon), and leaves "Gateway coredns[4155]: {…}" in
+      # `message`. The LAZY (?:\S+\s+)*? prefix is what absorbs that
+      # repeat. Lazy is NECESSARY — it tries zero repetitions first, so a
+      # tag already sitting at the start of `message` is not swallowed by
+      # a fixed \S+\s+ that would then call the first word of the message
+      # a process — but it was never SUFFICIENT on its own, which is
+      # exactly what 1a is for. No real AP or switch frame has been seen
+      # by this project yet (issue #20); the single-hostname shape is
+      # exercised by synthetic replay only.
       #
       # RE2: no lookahead, no backreferences. The condition duplicates the
       # pattern because a non-matching ExtractPatterns raises, and
       # error_mode: ignore logs every raise — at this volume that is the
-      # difference between a quiet collector and a noisy one.
+      # difference between a quiet collector and a noisy one. Keep that
+      # property: never let an ExtractPatterns run on a frame that cannot
+      # match it.
+      - context: log
+        conditions:
+          - 'attributes["cef_kv"] == nil and attributes["message"] != nil'
+        statements:
+          - 'set(log.attributes["dev_msg"], log.attributes["message"])'
+
       - context: log
         conditions:
           - 'attributes["cef_kv"] == nil and attributes["process.name"] == nil and attributes["message"] != nil and IsMatch(attributes["message"], "^(?:\\S+\\s+)*?[A-Za-z0-9_./-]+(?:\\[[0-9]+\\])?:\\s")'
         statements:
           - 'merge_maps(log.attributes, ExtractPatterns(log.attributes["message"], "^(?:\\S+\\s+)*?(?P<dev_tag>[A-Za-z0-9_./-]+)(?:\\[(?P<dev_pid>[0-9]+)\\])?:\\s+(?P<dev_msg>.*)$"), "upsert")'
-          # unifi-mq-broker logs its tag as a full path. ECS puts the path
-          # in process.executable and the basename in process.name.
-          - 'set(log.attributes["process.executable"], log.attributes["dev_tag"]) where IsMatch(log.attributes["dev_tag"], "^/")'
           - 'set(log.attributes["process.name"], log.attributes["dev_tag"])'
-          - 'replace_pattern(log.attributes["process.name"], "^.*/", "")'
           - 'set(log.attributes["process.pid"], Int(log.attributes["dev_pid"])) where log.attributes["dev_pid"] != nil and log.attributes["dev_pid"] != ""'
+
+      # ---- 1c. full-path tag → process.executable + basename ---------
+      # unifi-mq-broker logs its tag as a full path. ECS puts the path in
+      # process.executable and the basename in process.name.
+      #
+      # Applied to process.name whatever set it — 1b above OR the appname
+      # rule in transform/unifi_ecs, which reaches the same full path on a
+      # frame RFC3164 could split. Doing this inside 1b only left the two
+      # hostname shapes disagreeing on both fields.
+      - context: log
+        conditions:
+          - 'attributes["cef_kv"] == nil and attributes["process.name"] != nil and IsMatch(attributes["process.name"], "^/")'
+        statements:
+          - 'set(log.attributes["process.executable"], log.attributes["process.name"])'
+          - 'replace_pattern(log.attributes["process.name"], "^.*/", "")'
 
       # ---- 2. body → the message, raw frame → event.original ---------
       # Non-CEF records used to keep the whole frame in body, which the
