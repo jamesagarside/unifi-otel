@@ -1,0 +1,136 @@
+# unifi-otel — Docker Compose quickstart
+#
+# Two services, deliberately not run together:
+#
+#   docker compose up -d collector-debug   parse and print to stdout.
+#                                          Needs no backend and no
+#                                          credentials. Start here.
+#
+#   docker compose up -d                   parse and export over OTLP to
+#                                          OTLP_GATEWAY_ENDPOINT.
+#
+# They publish the same host ports, so bring one down before starting the
+# other. See docs/quickstart.md.
+#
+# SNMP polling is NOT enabled here. It is an opt-in module that needs
+# SNMPv3 credentials; see docs/snmp.md.
+
+name: unifi-otel
+
+# ── Shared service skeleton ──────────────────────────────────────────
+# Everything both services agree on. `command` and `environment` are
+# deliberately NOT in here — the difference between the two services is
+# exactly those two keys, and burying it in a merge key would hide it.
+x-collector: &collector
+  # Pinned to an exact tag on purpose: this config is verified against
+  # one collector build, and OTTL and receiver behaviour do change
+  # between releases. Do not float this to :latest. See issue #12.
+  image: otel/opentelemetry-collector-contrib:0.157.0
+
+  # The image is built FROM scratch — no shell, no wget, no curl — so a
+  # container-side `healthcheck:` is impossible. The health_check
+  # extension is published on the host instead (loopback only) and you
+  # probe it from outside:  curl -sf http://127.0.0.1:13133
+  read_only: true
+
+  # The collector reads its config from here. Read-only: nothing in the
+  # container ever writes to /conf.
+  volumes:
+    - ./collector:/conf:ro
+
+  ports:
+    # Receivers bind to UNPRIVILEGED ports inside the container (5514 and
+    # 6601) so it can run as the image's non-root user. The standard
+    # syslog ports are put back on by this publish, because that is what
+    # a UniFi gateway will send to.
+    #
+    # Publishing 514/601 requires the Docker daemon to bind a privileged
+    # port; that is normal for rootful Docker. Under rootless Docker,
+    # override these to something above 1024 in .env and set the port
+    # explicitly on the UniFi side.
+    - "${UNIFI_SYSLOG_UDP_PORT:-514}:5514/udp"
+    - "${UNIFI_SYSLOG_TCP_PORT:-601}:6601/tcp"
+    # Loopback only — this is a liveness endpoint, not something to
+    # expose to the network.
+    - "127.0.0.1:${UNIFI_HEALTH_PORT:-13133}:13133/tcp"
+
+services:
+  # ── Export path (default) ─────────────────────────────────────────
+  # `docker compose up -d`
+  collector:
+    <<: *collector
+    restart: unless-stopped
+    environment:
+      # See the note on the debug service — this is the trap that costs
+      # people an afternoon, so Compose refuses to start without it.
+      UNIFI_SYSLOG_TIMEZONE: ${UNIFI_SYSLOG_TIMEZONE:?set UNIFI_SYSLOG_TIMEZONE in .env to the IANA timezone of your UniFi gateway (e.g. Europe/London). An empty value silently means UTC and puts every non-CEF record a whole number of hours out. See docs/quickstart.md}
+
+      # The collector's own default for this is a Kubernetes in-cluster
+      # DNS name, which cannot resolve under Compose. Overriding it with
+      # an empty string here converts that into a loud startup failure —
+      #
+      #   Error: exporters::otlp_grpc/gateway: requires a non-empty "endpoint"
+      #
+      # — rather than a container that comes up and quietly fails to
+      # resolve otel-gateway.observability.svc.cluster.local forever.
+      #
+      # If you have not got a backend yet, use `collector-debug` below.
+      OTLP_GATEWAY_ENDPOINT: ${OTLP_GATEWAY_ENDPOINT:-}
+
+    # The collector has NO glob or directory mode. A file under
+    # ./collector that is not listed here is silently ignored, not an
+    # error — so this list is the entire configuration surface.
+    command:
+      - --config=/conf/10-receivers-logs.yaml
+      - --config=/conf/20-processors-logs.yaml
+      - --config=/conf/40-exporters.yaml
+      - --config=/conf/90-service.yaml
+
+  # ── Debug path (profile: debug) ───────────────────────────────────
+  # `docker compose up -d collector-debug`
+  #
+  # Naming the service on the command line auto-enables its profile, so
+  # you do not need --profile. Avoid `docker compose --profile debug up`:
+  # that starts BOTH services and they collide on the syslog ports.
+  collector-debug:
+    <<: *collector
+    profiles: ["debug"]
+    # Not `unless-stopped`: if the config is wrong you want to read the
+    # error, not watch it scroll past in a restart loop.
+    restart: "no"
+    environment:
+      UNIFI_SYSLOG_TIMEZONE: ${UNIFI_SYSLOG_TIMEZONE:?set UNIFI_SYSLOG_TIMEZONE in .env to the IANA timezone of your UniFi gateway (e.g. Europe/London). An empty value silently means UTC and puts every non-CEF record a whole number of hours out. See docs/quickstart.md}
+      # OTLP_GATEWAY_ENDPOINT is deliberately absent. The overlay below
+      # unwires otlp_grpc/gateway from every pipeline, so it is never
+      # built and never dialled — but it is still *validated*, and an
+      # empty endpoint fails validation. Leaving the variable unset lets
+      # the collector's own default fill it with a harmless placeholder.
+
+    # The same four config files, plus an inline overlay. The `yaml:`
+    # URI scheme feeds a config fragment straight from the command line,
+    # deep-merged like any other --config, which keeps the debug wiring
+    # out of collector/ entirely — nothing under collector/ has to know
+    # this profile exists.
+    #
+    # `::` is confmap's key delimiter, so `a::b::c: v` is the flattened
+    # spelling of a nested map.
+    command:
+      - --config=/conf/10-receivers-logs.yaml
+      - --config=/conf/20-processors-logs.yaml
+      - --config=/conf/40-exporters.yaml
+      - --config=/conf/90-service.yaml
+      # A debug exporter that prints EVERY record in full. This is not
+      # the same thing as the debug/parse_failures exporter already in
+      # collector/40-exporters.yaml, which only ever sees records that
+      # failed to parse.
+      - "--config=yaml:exporters::debug/stdout::verbosity: detailed"
+      # Print all of them. The exporter's sampling defaults drop records
+      # once the rate picks up, which on a first run looks exactly like
+      # a parser that stopped working.
+      - "--config=yaml:exporters::debug/stdout::sampling_initial: 1000"
+      - "--config=yaml:exporters::debug/stdout::sampling_thereafter: 1"
+      # Repoint both terminal pipelines at stdout. Lists are replaced on
+      # merge, not appended, so this drops otlp_grpc/gateway rather than
+      # adding to it — which is the point: no backend required.
+      - "--config=yaml:service::pipelines::logs/unifi_syslog_export::exporters: [debug/stdout]"
+      - "--config=yaml:service::pipelines::logs/unifi_parse_failures::exporters: [debug/parse_failures]"
