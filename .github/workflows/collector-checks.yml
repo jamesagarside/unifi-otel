@@ -73,7 +73,13 @@ jobs:
     name: otelcol validate
     runs-on: ubuntu-latest
     outputs:
-      result: ${{ steps.checks.outputs.result }}
+      # Combined, NOT steps.checks alone. This job runs two independent
+      # checks - the config permutations and the destination snippets -
+      # and the aggregate below reads this one value. Wiring it to the
+      # first step only would let a snippet failure fail the job while
+      # still reporting "ok" upward, which is the failure mode where the
+      # summary and the run conclusion disagree.
+      result: ${{ steps.combine.outputs.result }}
     env:
       IMAGE: otel/opentelemetry-collector-contrib:${{ inputs.collector-version }}
     steps:
@@ -186,17 +192,59 @@ jobs:
             echo "result=failed" >> "$GITHUB_OUTPUT"
           fi
 
+      # Destination snippets are the third permutation class in #10.
+      # They are what makes "contributed destinations accepted without
+      # the maintainer running the backend" a real policy rather than a
+      # hope: validate proves the snippet parses and every component it
+      # names exists in the pinned image, which is the most that can be
+      # checked without the backend itself.
+      #
+      # It also catches doc rot, which is the likelier failure. The loki
+      # exporter was removed from contrib outright; a snippet naming it
+      # would sit in the docs looking authoritative forever.
+      - name: Validate destination snippets
+        id: destinations
+        run: |
+          set -uo pipefail
+          rc=0
+          python3 scripts/check-destination-snippets.py --image "$IMAGE" || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::destination snippet check could not run (exit 2) — no snippets found, or docker/doc missing. Treated as failure: a check that silently validates nothing looks identical to one that passes."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::a destination snippet in docs/destinations.md does not validate against ${IMAGE}. Exporter names and keys move between releases; fix the snippet or mark it for the version it targets."
+          fi
+          if [ "$rc" -eq 0 ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Combine results
+        id: combine
+        if: always()
+        env:
+          RESULT: ${{ steps.checks.outputs.result }}
+          DEST_RESULT: ${{ steps.destinations.outputs.result }}
+        run: |
+          set -uo pipefail
+          echo "permutations=${RESULT:-skipped} destinations=${DEST_RESULT:-skipped}"
+          if [ "${RESULT:-}" = "ok" ] && [ "${DEST_RESULT:-}" = "ok" ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Verdict
         if: ${{ !inputs.soft-fail }}
         env:
-          RESULT: ${{ steps.checks.outputs.result }}
+          RESULT: ${{ steps.combine.outputs.result }}
         run: |
           [ "$RESULT" = "ok" ] || exit 1
 
       - name: Verdict (soft-fail)
-        if: ${{ inputs.soft-fail && steps.checks.outputs.result != 'ok' }}
+        if: ${{ inputs.soft-fail && steps.combine.outputs.result != 'ok' }}
         run: |
-          echo "::warning::otelcol validate failed against ${IMAGE}. Soft-fail is on, so this job is green; the calling workflow reports it."
+          echo "::warning::otelcol validate or the destination snippets failed against ${IMAGE}. Soft-fail is on, so this job is green; the calling workflow reports it."
 
   # ── Corpus: replay real frames, diff against goldens ───────────────
   # This is the check that makes the parsing claims credible. The other
