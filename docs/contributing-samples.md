@@ -246,30 +246,44 @@ per line. Group by device class and frame shape rather than by capture
 session — a file called `usw-lite-8-kernel.txt` is useful to a reviewer
 and `capture-2026-08-13.txt` is not.
 
-The golden-file replay harness is
-[#3](https://github.com/jamesagarside/unifi-otel/issues/3) and has not
-landed yet, so there is currently no `make test` to run. Until it does,
-check your fixture by replaying it into the debug profile and looking at
-what comes out:
+Run the replay harness. It is the same thing CI runs, so a green run
+locally means a green run on your PR:
 
 ```bash
-docker compose up -d collector-debug
-python3 - tests/corpus/your-fixture.txt <<'EOF'
-import socket, sys, time
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-for line in open(sys.argv[1], 'rb'):
-    line = line.rstrip(b'\r\n')
-    if line:
-        s.sendto(line, ('127.0.0.1', 514))
-        time.sleep(0.05)
-EOF
-docker compose logs collector-debug | grep -o 'event.dataset: Str([^)]*)' | sort | uniq -c
+python3 tests/run.py
 ```
 
-Report that count in the PR, plus anything carrying `unifi.parse_failure`.
-You do not need to fix what you find — a fixture that fails is a valid
-and welcome contribution. Say so in the PR so a reviewer knows the frame
-is deliberate and does not "correct" it.
+It replays every frame under `tests/corpus/` through the real collector
+image and diffs the result against the golden files in `tests/golden/`.
+Adding a frame therefore fails the first time by design — there is no
+golden for it yet. Generate one:
+
+```bash
+python3 tests/run.py --update
+```
+
+**Then read the diff before committing it.** That diff is the entire
+value of the golden files: it is a plain statement of how your frame was
+parsed. If a field is missing, or the dataset is not what you expected,
+you have found something — which is a useful contribution, not a
+problem.
+
+`--update` is also how a genuine regression gets laundered into a
+"passing" test suite, so the rule is: regenerate when you have ADDED a
+frame, and be suspicious when regenerating changes goldens for frames
+you did not touch. `tests/README.md` covers this in more detail.
+
+You do not need to fix what you find — **a fixture that fails is a valid
+and welcome contribution.** Say so in the PR so a reviewer knows the
+frame is deliberate and does not "correct" it.
+
+Two harness details that will otherwise look like bugs:
+
+- Corpus files may carry `#` comment lines, but those lines **must not
+  contain dotted tokens** — the privacy gate cannot tell `event.dataset`
+  from a domain name, so a comment mentioning one will fail the check.
+- The gate runs over `tests/corpus/` only, never `tests/golden/`, for
+  exactly that reason.
 
 ---
 
