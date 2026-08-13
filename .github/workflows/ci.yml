@@ -1,0 +1,149 @@
+# ─────────────────────────────────────────────────────────────────────
+# The pull request gate.
+#
+# Runs every check in collector-checks.yml against the collector version
+# this repository actually pins. Deterministic: nothing here reaches for
+# a floating tag, so this workflow can only go red because of a change
+# in the pull request. Upstream release tracking is a separate concern
+# and lives in upstream-collector.yml.
+#
+# Dependabot's version-bump pull requests are gated by this workflow
+# automatically — the bump changes the pin, `pins` reads the new pin,
+# and the checks run against the new version. Nothing version-specific
+# is hard-coded below.
+# ─────────────────────────────────────────────────────────────────────
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ── The pin has to agree with itself ───────────────────────────────
+  # The collector version appears in three machine-read places, and
+  # Dependabot only bumps one of them (docker-compose.yml). A bump that
+  # moves the Compose image while leaving the chart on the old version
+  # would ship a chart that quietly deploys a different binary from the
+  # one the Compose quickstart was tested with.
+  #
+  # This job is therefore expected to fail on a fresh Dependabot pull
+  # request, with a message naming exactly which files still need
+  # editing. That is a red X the pull request caused and that a human
+  # can clear in one commit — not the ambient kind.
+  pins:
+    name: version pins agree
+    runs-on: ubuntu-latest
+    outputs:
+      # The Compose pin is the canonical one: it is the version the
+      # quickstart runs and the only one Dependabot bumps. The checks
+      # run against it whether or not the other pins agree, so a bump
+      # pull request still tells you whether the new release works.
+      collector-version: ${{ steps.read.outputs.collector-version }}
+      consistent: ${{ steps.read.outputs.consistent }}
+    env:
+      YQ_VERSION: v4.52.5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install yq ${{ env.YQ_VERSION }}
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Read and compare pins
+        id: read
+        run: |
+          set -uo pipefail
+
+          # Read the anchor directly rather than services.collector.image.
+          # The anchor is where the value is actually written, and going
+          # through the merge key would make this check depend on how the
+          # YAML parser handles `<<`, which has changed before.
+          compose_image=$(yq -r '.["x-collector"].image' docker-compose.yml)
+          compose="${compose_image##*:}"
+
+          chart_values=$(yq -r '.["opentelemetry-collector"].image.tag' chart/values.yaml)
+          chart_app=$(yq -r '.appVersion' chart/Chart.yaml)
+
+          # shellcheck disable=SC1091
+          . .github/collector-versions.env
+          minimum="${COLLECTOR_MIN_SUPPORTED}"
+
+          {
+            echo "## Collector version pins"
+            echo
+            echo "| Where | Value |"
+            echo "| ----- | ----- |"
+            echo "| \`docker-compose.yml\` \`x-collector.image\` | \`${compose}\` |"
+            echo "| \`chart/values.yaml\` \`image.tag\` | \`${chart_values}\` |"
+            echo "| \`chart/Chart.yaml\` \`appVersion\` | \`${chart_app}\` |"
+            echo "| \`.github/collector-versions.env\` minimum supported | \`${minimum}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+
+          if [ "$compose" != "$chart_values" ] || [ "$compose" != "$chart_app" ]; then
+            echo "::error::the collector version pins disagree. docker-compose.yml says ${compose}, chart/values.yaml says ${chart_values}, chart/Chart.yaml appVersion says ${chart_app}. Dependabot only bumps docker-compose.yml; set the other two to match, and update the version tables in chart/README.md, docs/helm.md, docs/snmp.md, docs/destinations.md and docs/versions.md. See docs/versions.md for the checklist."
+            failed=1
+          fi
+
+          # `sort -V` puts the lower version first; if the minimum sorts
+          # first (or they are equal) the pin is at or above it.
+          lowest=$(printf '%s\n%s\n' "$compose" "$minimum" | sort -V | head -n1)
+          if [ "$lowest" != "$minimum" ]; then
+            echo "::error::the pinned collector version ${compose} is below the declared minimum supported version ${minimum}. Either raise the pin or lower the minimum in .github/collector-versions.env and say why in docs/versions.md."
+            failed=1
+          fi
+
+          echo "collector-version=${compose}" >> "$GITHUB_OUTPUT"
+          if [ "$failed" -eq 0 ]; then
+            echo "consistent=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "consistent=no" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The consistency verdict is a job of its own so that a disagreement
+  # does not skip `validate`. On a Dependabot bump you want both facts:
+  # "you still have files to edit" AND "the new release does/does not
+  # work". Collapsing them into one job hides the second behind the
+  # first.
+  pin-consistency:
+    name: version pins agree (verdict)
+    needs: pins
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          CONSISTENT: ${{ needs.pins.outputs.consistent }}
+        run: |
+          [ "$CONSISTENT" = "yes" ] || {
+            echo "the pins disagree — see the 'version pins agree' job log for which files"
+            exit 1
+          }
+
+  # ── Everything else ────────────────────────────────────────────────
+  # One of the two cells of the #12 matrix: the version this repository
+  # pins. The other cell (:latest) is in upstream-collector.yml, for the
+  # reasons argued there.
+  validate:
+    name: ${{ needs.pins.outputs.collector-version }}
+    needs: pins
+    uses: ./.github/workflows/collector-checks.yml
+    with:
+      collector-version: ${{ needs.pins.outputs.collector-version }}
+      soft-fail: false

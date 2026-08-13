@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────
+# Dependabot — raises pull requests, and nothing else.
+#
+# ── There is deliberately no auto-merge here, and there must not be ──
+# Nothing in this file enables auto-merge, and adding it would need a
+# separate workflow calling `gh pr merge --auto`, which does not exist
+# in this repository on purpose.
+#
+# Green CI on a bump pull request is a PARTIAL signal. It proves the
+# configuration still parses and builds against the new collector, that
+# the chart still renders, and that the rendered config still validates.
+# It does not prove:
+#
+#   * that SNMP still works. There is no offline test path for it — the
+#     collector polls outward to a live device, so there is no frame to
+#     replay (#8, docs/snmp.md).
+#   * that any destination other than OTLP still works. Those are
+#     documented snippets, verified by whoever contributed them, not by
+#     anything that runs here (docs/destinations.md).
+#   * that parsing still produces the same output. The golden-file
+#     corpus replay that would prove it does not exist yet (#3).
+#
+# Auto-merging on a partial signal is how a bad upstream release
+# reaches every user of this project unattended, at 07:00 on a Monday,
+# with nobody watching. A human reads the release notes and merges.
+#
+# Revisit when #3 has landed and the corpus is broad enough that green
+# means something closer to "parsing is unchanged".
+#
+# ── What Dependabot does NOT bump ────────────────────────────────────
+# Only docker-compose.yml. The collector version is also written in
+# chart/values.yaml (image.tag), chart/Chart.yaml (appVersion) and
+# several documentation tables, and a bump has to move all of them
+# together. The `pins` job in .github/workflows/ci.yml compares the
+# three machine-readable ones and fails the pull request with the list
+# of files still to edit, so a half-finished bump cannot merge quietly.
+#
+# The upstream Helm chart dependency in chart/Chart.yaml is also not
+# watched. Bumping it without regenerating chart/Chart.lock breaks
+# `helm dependency build`, so every such pull request would arrive red
+# and need a local `helm dependency update` anyway — an issue is a
+# better prompt for that than a pull request nobody can merge.
+# ─────────────────────────────────────────────────────────────────────
+version: 2
+
+updates:
+  # ── The collector image ────────────────────────────────────────────
+  # `docker-compose`, not `docker`: the image tag lives on the
+  # `x-collector` YAML anchor rather than on a service, and the
+  # docker-compose parser resolves merge keys before looking for
+  # `services.*.image`, so it sees the pin through the `<<: *collector`
+  # in both services. Its updater then rewrites the single `image:`
+  # line where the anchor is defined.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    # One open bump at a time. A queue of collector versions is not
+    # useful when each one needs a human to read release notes.
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps"
+    # Left at the default `dependencies` label on purpose: a custom
+    # label that does not already exist in the repository is silently
+    # ignored, which is a worse outcome than the default.
+
+  # ── Actions used by the workflows ──────────────────────────────────
+  # Grouped into one pull request: these are CI plumbing, they are not
+  # version-sensitive to this project's parsing, and separate pull
+  # requests for each would drown the collector bumps that matter.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "ci"

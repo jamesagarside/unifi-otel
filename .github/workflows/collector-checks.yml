@@ -1,0 +1,427 @@
+# ─────────────────────────────────────────────────────────────────────
+# Every check this project can run against a given collector release,
+# in one reusable workflow.
+#
+# It is called twice from two places:
+#
+#   ci.yml                  once, with the version pinned in the repo.
+#                           Hard failure. This is the PR gate.
+#
+#   upstream-collector.yml  twice, with the minimum supported version
+#                           and with whatever :latest currently is.
+#                           The :latest call passes soft-fail: true.
+#
+# `soft-fail` exists because a break in the :latest cell is an upstream
+# problem the maintainer did not cause. Reporting it as a failed run
+# trains people to ignore failed runs. In soft-fail mode the checks
+# still run and still record their real result in the `result` output
+# and the step summary; the job simply does not exit non-zero. The
+# caller turns that result into an issue, which is actionable, instead
+# of a red X, which is ambient.
+#
+# ── Adding the jobs that do not exist yet ────────────────────────────
+# #3 (golden-file corpus replay) and #11 (corpus privacy gate) belong
+# HERE, as sibling jobs of `config` and `chart`, added to `verdict`'s
+# `needs` list. Nothing else has to change: both callers already run
+# everything in this file, so a new job is automatically gated on PRs
+# and automatically exercised against new upstream releases.
+#
+# There is deliberately no placeholder job for them. A job that runs
+# nothing and reports green is worse than an absent job — it puts a
+# passing check named "corpus-replay" on every PR while proving
+# nothing at all.
+# ─────────────────────────────────────────────────────────────────────
+name: collector-checks
+
+on:
+  workflow_call:
+    inputs:
+      collector-version:
+        description: >-
+          Collector release to check against, without the leading v and
+          without the image name — e.g. 0.157.0.
+        required: true
+        type: string
+      soft-fail:
+        description: >-
+          Run every check and record the real result, but do not fail
+          the job. For the :latest cell, where a failure is upstream
+          news rather than a defect in this repository.
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      result:
+        description: "ok if every check passed, failed otherwise."
+        value: ${{ jobs.verdict.outputs.result }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ── otelcol validate, three permutations ───────────────────────────
+  # The collector has no glob or directory mode, so the --config flag
+  # list IS the configuration surface and an unlisted file is a silent
+  # no-op rather than an error. That makes the third permutation the
+  # important one: without a negative control, "SNMP is off by default"
+  # is indistinguishable from "SNMP is on but happens to be inert".
+  config:
+    name: otelcol validate
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.checks.outputs.result }}
+    env:
+      IMAGE: otel/opentelemetry-collector-contrib:${{ inputs.collector-version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pull collector image
+        run: docker pull "$IMAGE"
+
+      - name: Validate config permutations
+        id: checks
+        run: |
+          set -uo pipefail
+
+          BASE=(
+            --config=/conf/10-receivers-logs.yaml
+            --config=/conf/20-processors-logs.yaml
+            --config=/conf/40-exporters.yaml
+            --config=/conf/90-service.yaml
+          )
+          SNMP=(
+            --config=/conf/optional/snmp/15-receivers-snmp.yaml
+            --config=/conf/optional/snmp/30-processors-metrics.yaml
+            --config=/conf/optional/snmp/91-service-metrics.yaml
+          )
+
+          failed=0
+          {
+            echo "## otelcol validate — \`${IMAGE}\`"
+            echo
+            echo "| # | Permutation | Expected | Actual | |"
+            echo "| - | ----------- | -------- | ------ | - |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          record() {  # name expected actual verdict
+            echo "| $1 | $2 | $3 | $4 | $5 |" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # ── 1. default four files, no SNMP environment ─────────────
+          echo "::group::1. default four files (expect exit 0)"
+          out1=$(docker run --rm -v "$PWD/collector":/conf:ro "$IMAGE" \
+                   validate "${BASE[@]}" 2>&1)
+          rc1=$?
+          echo "$out1"
+          echo "exit=$rc1"
+          echo "::endgroup::"
+          if [ "$rc1" -eq 0 ]; then
+            record 1 "default four files, SNMP env unset" "exit 0" "exit $rc1" "pass"
+          else
+            record 1 "default four files, SNMP env unset" "exit 0" "exit $rc1" "**FAIL**"
+            echo "::error::default config does not validate against ${IMAGE}"
+            failed=1
+          fi
+
+          # ── 2. all seven files, credentials supplied ───────────────
+          echo "::group::2. all seven files with credentials (expect exit 0)"
+          out2=$(docker run --rm \
+                   -e UNIFI_SNMP_USER=ci -e UNIFI_SNMP_PASSWORD=ci-not-a-real-secret \
+                   -v "$PWD/collector":/conf:ro "$IMAGE" \
+                   validate "${BASE[@]}" "${SNMP[@]}" 2>&1)
+          rc2=$?
+          echo "$out2"
+          echo "exit=$rc2"
+          echo "::endgroup::"
+          if [ "$rc2" -eq 0 ]; then
+            record 2 "all seven files, credentials set" "exit 0" "exit $rc2" "pass"
+          else
+            record 2 "all seven files, credentials set" "exit 0" "exit $rc2" "**FAIL**"
+            echo "::error::SNMP opt-in config does not validate against ${IMAGE}"
+            failed=1
+          fi
+
+          # ── 3. negative control ────────────────────────────────────
+          # Non-zero is necessary but not sufficient: ANY config error
+          # would give a non-zero exit and the control would pass while
+          # proving nothing. The message has to name the SNMP receiver.
+          echo "::group::3. all seven files WITHOUT credentials (expect non-zero)"
+          out3=$(docker run --rm -v "$PWD/collector":/conf:ro "$IMAGE" \
+                   validate "${BASE[@]}" "${SNMP[@]}" 2>&1)
+          rc3=$?
+          echo "$out3"
+          echo "exit=$rc3"
+          echo "::endgroup::"
+          if [ "$rc3" -eq 0 ]; then
+            record 3 "all seven files, credentials unset" "non-zero" "exit 0" "**FAIL**"
+            echo "::error::negative control passed validation — SNMP no longer requires credentials, so an operator who opts in without them would get a collector that starts and polls nothing"
+            failed=1
+          elif ! grep -q 'receivers::snmp/unifi' <<<"$out3"; then
+            record 3 "all seven files, credentials unset" "non-zero, snmp/unifi named" "exit $rc3, other error" "**FAIL**"
+            echo "::error::negative control failed for the wrong reason — the error does not mention receivers::snmp/unifi, so this run proves nothing about SNMP"
+            failed=1
+          else
+            record 3 "all seven files, credentials unset" "non-zero, snmp/unifi named" "exit $rc3" "pass"
+          fi
+
+          if [ "$failed" -eq 0 ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verdict
+        if: ${{ !inputs.soft-fail }}
+        env:
+          RESULT: ${{ steps.checks.outputs.result }}
+        run: |
+          [ "$RESULT" = "ok" ] || exit 1
+
+      - name: Verdict (soft-fail)
+        if: ${{ inputs.soft-fail && steps.checks.outputs.result != 'ok' }}
+        run: |
+          echo "::warning::otelcol validate failed against ${IMAGE}. Soft-fail is on, so this job is green; the calling workflow reports it."
+
+  # ── Chart: structure, then the config inside the structure ─────────
+  chart:
+    name: helm lint/template/kubeconform + drift
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.checks.outputs.result }}
+    env:
+      IMAGE: otel/opentelemetry-collector-contrib:${{ inputs.collector-version }}
+      # Pinned for the same reason the collector is: a yq that changes
+      # how sort_keys or eval-all behaves would turn the drift check
+      # into a coin toss.
+      YQ_VERSION: v4.52.5
+      KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.2.4
+
+      - name: Install yq ${{ env.YQ_VERSION }}
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Pull collector image
+        run: docker pull "$IMAGE"
+
+      # `helm dependency build` resolves from the committed Chart.lock,
+      # but it will not fetch from a repository URL the local helm has
+      # never heard of — on a clean runner it fails with "no repository
+      # definition for ...". Verified by running it against an empty
+      # HELM_REPOSITORY_CONFIG.
+      #
+      # `build`, never `update`: build installs exactly what Chart.lock
+      # pins, update re-resolves the range and rewrites the lock.
+      - name: Fetch chart dependency
+        run: |
+          set -euo pipefail
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm dependency build chart/
+
+      - name: Lint, render, conform, drift
+        id: checks
+        run: |
+          set -uo pipefail
+
+          W="${RUNNER_TEMP}/chart-checks"
+          mkdir -p "$W/conf"
+          failed=0
+
+          {
+            echo "## chart — \`${IMAGE}\`"
+            echo
+            echo "| Check | Permutation | Result |"
+            echo "| ----- | ----------- | ------ |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          record() { echo "| $1 | $2 | $3 |" >> "$GITHUB_STEP_SUMMARY"; }
+
+          check() {  # label permutation -- command...
+            local label="$1" perm="$2"; shift 3
+            echo "::group::${label} (${perm})"
+            "$@"
+            local rc=$?
+            echo "exit=$rc"
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              record "$label" "$perm" "pass"
+            else
+              record "$label" "$perm" "**FAIL** (exit $rc)"
+              echo "::error::${label} failed for the ${perm} permutation"
+              failed=1
+            fi
+            return $rc
+          }
+
+          # ── helm lint ──────────────────────────────────────────────
+          check "helm lint" "default" -- helm lint chart/
+          check "helm lint" "snmp"    -- helm lint chart/ -f chart/values-snmp.yaml
+
+          # ── helm template ──────────────────────────────────────────
+          echo "::group::helm template"
+          helm template unifi-otel chart/ > "$W/render-default.yaml"; rcd=$?
+          helm template unifi-otel chart/ -f chart/values-snmp.yaml > "$W/render-snmp.yaml"; rcs=$?
+          echo "::endgroup::"
+          if [ "$rcd" -eq 0 ]; then record "helm template" "default" "pass"; else record "helm template" "default" "**FAIL** (exit $rcd)"; failed=1; fi
+          if [ "$rcs" -eq 0 ]; then record "helm template" "snmp" "pass"; else record "helm template" "snmp" "**FAIL** (exit $rcs)"; failed=1; fi
+
+          if [ "$rcd" -ne 0 ] || [ "$rcs" -ne 0 ]; then
+            echo "::error::helm template failed; skipping the checks that consume its output"
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ── kubeconform ────────────────────────────────────────────
+          # Proves the render is valid Kubernetes. It says nothing
+          # whatsoever about the collector config inside the ConfigMap,
+          # which is a string as far as it is concerned — that gap is
+          # what the "rendered config" check below closes.
+          for perm in default snmp; do
+            echo "::group::kubeconform (${perm})"
+            docker run --rm -i "$KUBECONFORM_IMAGE" \
+              -strict -summary -output text < "$W/render-${perm}.yaml"
+            rc=$?
+            echo "exit=$rc"
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              record "kubeconform" "$perm" "pass"
+            else
+              record "kubeconform" "$perm" "**FAIL** (exit $rc)"
+              echo "::error::kubeconform rejected the ${perm} render"
+              failed=1
+            fi
+          done
+
+          # ── rendered collector config ──────────────────────────────
+          # The one chart check that is genuinely version-sensitive:
+          # run the ConfigMap's contents through the collector binary
+          # for this cell's version.
+          yq 'select(.kind=="ConfigMap") | .data.relay' "$W/render-default.yaml" > "$W/conf/relay.yaml"
+          yq 'select(.kind=="ConfigMap") | .data.relay' "$W/render-snmp.yaml"    > "$W/conf/relay-snmp.yaml"
+
+          echo "::group::validate rendered config (default)"
+          docker run --rm -v "$W/conf":/conf:ro "$IMAGE" validate --config=/conf/relay.yaml
+          rc=$?
+          echo "exit=$rc"
+          echo "::endgroup::"
+          if [ "$rc" -eq 0 ]; then
+            record "validate rendered config" "default" "pass"
+          else
+            record "validate rendered config" "default" "**FAIL** (exit $rc)"
+            echo "::error::the chart renders a well-formed ConfigMap containing a collector config that does not validate"
+            failed=1
+          fi
+
+          echo "::group::validate rendered config (snmp)"
+          docker run --rm \
+            -e UNIFI_SNMP_USER=ci -e UNIFI_SNMP_PASSWORD=ci-not-a-real-secret \
+            -v "$W/conf":/conf:ro "$IMAGE" validate --config=/conf/relay-snmp.yaml
+          rc=$?
+          echo "exit=$rc"
+          echo "::endgroup::"
+          if [ "$rc" -eq 0 ]; then
+            record "validate rendered config" "snmp" "pass"
+          else
+            record "validate rendered config" "snmp" "**FAIL** (exit $rc)"
+            echo "::error::the chart renders a well-formed ConfigMap containing a collector config that does not validate"
+            failed=1
+          fi
+
+          # ── chart/collector drift ──────────────────────────────────
+          # chart/values.yaml mirrors collector/*.yaml because Helm
+          # cannot read files outside the chart directory. Nothing but
+          # this check notices when the mirror goes stale, and a stale
+          # mirror ships a silently older parser. Procedure is the one
+          # documented in chart/README.md.
+          drift() {  # perm rendered-file source-files...
+            local perm="$1" rendered="$2"; shift 2
+            echo "::group::chart/collector drift (${perm})"
+            # shellcheck disable=SC2016  # $i is a yq variable, not a shell one
+            yq eval-all '. as $i ireduce ({}; . * $i)' "$@" \
+              | yq -o=json 'sort_keys(..)' > "$W/src-${perm}.json"
+            yq 'select(.kind=="ConfigMap") | .data.relay' "$rendered" \
+              | yq -o=json 'sort_keys(..)' > "$W/chart-${perm}.json"
+            diff -u "$W/src-${perm}.json" "$W/chart-${perm}.json"
+            local rc=$?
+            echo "exit=$rc"
+            echo "::endgroup::"
+            if [ "$rc" -eq 0 ]; then
+              record "chart/collector drift" "$perm" "pass"
+            else
+              record "chart/collector drift" "$perm" "**FAIL**"
+              echo "::error::chart/values.yaml has drifted from collector/*.yaml (${perm}). collector/*.yaml is the source of truth: mirror the change into the chart, then re-run. See chart/README.md."
+              failed=1
+            fi
+          }
+
+          drift default "$W/render-default.yaml" \
+            collector/10-receivers-logs.yaml \
+            collector/20-processors-logs.yaml \
+            collector/40-exporters.yaml \
+            collector/90-service.yaml
+
+          drift snmp "$W/render-snmp.yaml" \
+            collector/10-receivers-logs.yaml \
+            collector/20-processors-logs.yaml \
+            collector/40-exporters.yaml \
+            collector/90-service.yaml \
+            collector/optional/snmp/15-receivers-snmp.yaml \
+            collector/optional/snmp/30-processors-metrics.yaml \
+            collector/optional/snmp/91-service-metrics.yaml
+
+          if [ "$failed" -eq 0 ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verdict
+        if: ${{ !inputs.soft-fail }}
+        env:
+          RESULT: ${{ steps.checks.outputs.result }}
+        run: |
+          [ "$RESULT" = "ok" ] || exit 1
+
+      - name: Verdict (soft-fail)
+        if: ${{ inputs.soft-fail && steps.checks.outputs.result != 'ok' }}
+        run: |
+          echo "::warning::chart checks failed against ${IMAGE}. Soft-fail is on, so this job is green; the calling workflow reports it."
+
+  # ── Aggregate ──────────────────────────────────────────────────────
+  # Exists so a caller can ask "did the checks pass?" independently of
+  # "did the run fail?", which is the whole point of soft-fail. Add new
+  # check jobs to `needs` and to the expression below.
+  verdict:
+    name: verdict
+    runs-on: ubuntu-latest
+    needs: [config, chart]
+    if: always()
+    outputs:
+      result: ${{ steps.aggregate.outputs.result }}
+    steps:
+      - name: Aggregate
+        id: aggregate
+        env:
+          CONFIG_RESULT: ${{ needs.config.outputs.result }}
+          CHART_RESULT: ${{ needs.chart.outputs.result }}
+        run: |
+          set -uo pipefail
+          echo "config=${CONFIG_RESULT:-skipped} chart=${CHART_RESULT:-skipped}"
+          if [ "${CONFIG_RESULT:-}" = "ok" ] && [ "${CHART_RESULT:-}" = "ok" ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi

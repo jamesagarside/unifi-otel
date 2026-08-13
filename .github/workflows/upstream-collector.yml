@@ -1,0 +1,209 @@
+# ─────────────────────────────────────────────────────────────────────
+# Upstream release tracking — the two-cell matrix from #12.
+#
+#   minimum supported   .github/collector-versions.env. Hard failure:
+#                       if the oldest version this project claims to
+#                       support stops working, the claim is wrong and
+#                       that is this repository's problem.
+#
+#   latest              whatever otel/opentelemetry-collector-contrib
+#                       :latest resolves to today. SOFT failure.
+#
+# ── Why this is not in ci.yml, and why :latest is soft ───────────────
+# The :latest cell exists to break. That is its job. But a failure
+# there is caused by an upstream release, not by anything in the pull
+# request being reviewed, and a red X that the author cannot act on is
+# how a project teaches its contributors to stop reading CI. Two things
+# follow:
+#
+#   1. It runs on a schedule, not on pull requests, so it never appears
+#      as a check on someone's work.
+#   2. The :latest cell is soft-failed, so the scheduled run stays
+#      green and the signal is carried by an issue instead. An issue
+#      can be triaged, assigned, closed and commented on; a red run
+#      from three weeks ago can only be ignored.
+#
+# The minimum cell is NOT soft-failed. A break there means this project
+# is making a false compatibility claim, which is a defect here.
+#
+# ── Why two jobs and not strategy.matrix ─────────────────────────────
+# Two cells with different failure policies, and — more decisively —
+# job outputs from a matrix overwrite one another, so `report` could
+# not reliably tell which cell produced which result. Two named jobs
+# keep the outputs distinct. Adding a third cell means adding a third
+# job, which is the right amount of friction for a decision #12 argues
+# should stay at two.
+# ─────────────────────────────────────────────────────────────────────
+name: upstream-collector
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC. Weekly is enough: the collector releases
+    # roughly fortnightly and nothing here is urgent.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      version-override:
+        description: >-
+          Check this exact collector version instead of resolving
+          :latest — e.g. 0.159.0. Leave empty to use :latest.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-collector
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: resolve versions
+    runs-on: ubuntu-latest
+    outputs:
+      minimum: ${{ steps.resolve.outputs.minimum }}
+      latest: ${{ steps.resolve.outputs.latest }}
+      same: ${{ steps.resolve.outputs.same }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve
+        id: resolve
+        env:
+          # Workflow-dispatch input, so it is attacker-controlled in the
+          # sense that anyone with write access can type anything into
+          # it. It is validated against a strict pattern before it goes
+          # anywhere near a shell command.
+          VERSION_OVERRIDE: ${{ inputs.version-override }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck disable=SC1091
+          . .github/collector-versions.env
+          minimum="${COLLECTOR_MIN_SUPPORTED}"
+
+          if [ -n "${VERSION_OVERRIDE:-}" ]; then
+            if ! printf '%s' "$VERSION_OVERRIDE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::version-override must look like 0.157.0"
+              exit 1
+            fi
+            latest="$VERSION_OVERRIDE"
+            source_of_latest="workflow_dispatch input"
+          else
+            # :latest is a moving pointer. Resolve it to a concrete
+            # version so the two cells below check a fixed thing, the
+            # issue title names a fixed thing, and a re-run months
+            # later means something. The image carries the version as
+            # an OCI label; `--version` on the binary agrees with it.
+            docker pull --quiet otel/opentelemetry-collector-contrib:latest
+            latest=$(docker image inspect otel/opentelemetry-collector-contrib:latest \
+              --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
+            source_of_latest=":latest"
+          fi
+
+          if [ -z "$latest" ]; then
+            echo "::error::could not resolve a version for otel/opentelemetry-collector-contrib:latest"
+            exit 1
+          fi
+
+          same=no
+          [ "$latest" = "$minimum" ] && same=yes
+
+          {
+            echo "minimum=${minimum}"
+            echo "latest=${latest}"
+            echo "same=${same}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Upstream collector"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Minimum supported | \`${minimum}\` |"
+            echo "| Latest (${source_of_latest}) | \`${latest}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  minimum:
+    name: minimum ${{ needs.resolve.outputs.minimum }}
+    needs: resolve
+    uses: ./.github/workflows/collector-checks.yml
+    with:
+      collector-version: ${{ needs.resolve.outputs.minimum }}
+      soft-fail: false
+
+  latest:
+    name: latest ${{ needs.resolve.outputs.latest }}
+    needs: resolve
+    # Skipped when :latest has not moved past the minimum — running the
+    # identical set of checks twice on the same image tells nobody
+    # anything.
+    if: needs.resolve.outputs.same != 'yes'
+    uses: ./.github/workflows/collector-checks.yml
+    with:
+      collector-version: ${{ needs.resolve.outputs.latest }}
+      soft-fail: true
+
+  # ── Turn a soft failure into something actionable ──────────────────
+  report:
+    name: report
+    needs: [resolve, latest]
+    if: always() && needs.latest.result != 'skipped' && needs.latest.outputs.result != 'ok'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          LATEST: ${{ needs.resolve.outputs.latest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          title="Collector ${LATEST} fails this project's checks"
+
+          # One issue per upstream version. Re-running the workflow
+          # comments on the existing issue rather than opening another.
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --search "\"${title}\" in:title" --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
+
+          body=$(cat <<EOF
+          The scheduled upstream check found that collector ${LATEST} does not
+          pass this project's checks. The pinned version is unaffected and no
+          action is required by users.
+
+          Run: ${RUN_URL}
+
+          The run itself is green on purpose — the \`latest\` cell is soft-failed
+          so that an upstream break does not show up as a failed run. See the
+          step summary in the run above for exactly which check failed.
+
+          Things worth suspecting first, all of which have been version-sensitive
+          before (see docs/versions.md):
+
+          - the deprecated bare \`otlp\` exporter alias
+          - the syslog receiver's empty-environment timezone fallback
+          - backreference syntax in OTTL \`replace_pattern\` replacements
+          - deep-merge semantics for repeated \`--config\` flags
+          - whether \`snmpreceiver\` still rejects missing SNMPv3 credentials
+
+          Closing this without fixing anything is a legitimate outcome if the
+          change is upstream's to revert. Do not bump the pin until it passes.
+          EOF
+          )
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+            echo "commented on issue #${existing}"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body"
+          fi
