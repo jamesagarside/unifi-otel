@@ -1,0 +1,32 @@
+unifi-otel
+OpenTelemetry Collector configuration that receives UniFi syslog/CEF and
+SNMP, parses it into ECS-shaped log records, and exports it over OTLP.
+
+Copyright 2026 James Garside
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may
+not use this work except in compliance with the License. You may obtain a
+copy of the License in the LICENSE file distributed with this work, or at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations
+under the License.
+
+
+TRADEMARKS AND NON-AFFILIATION
+
+This project is not affiliated with, endorsed by, or supported by
+Ubiquiti Inc. UniFi, UbiOS, and other Ubiquiti product names are
+trademarks of their respective owners and are used here only to describe
+the log and metric formats this configuration parses.
+
+Likewise, this project is not affiliated with, endorsed by, or supported
+by the vendors of any observability backend, platform, or product named
+anywhere in this repository or its documentation. Such names are
+trademarks of their respective owners and are used only to describe where
+telemetry produced by this configuration can be sent. This is not an
+official product of any of them.
