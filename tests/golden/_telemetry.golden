@@ -6,6 +6,6 @@
 
 count  level  component  operator  error
     1  error  syslog/unifi_udp  regex_parser  regex pattern does not match
-    8  error  syslog/unifi_udp  syslog_parser  expecting a sequence number (from 1 to max 255 digits) [col 3]
-    8  error  syslog/unifi_udp  udp_input  expecting a sequence number (from 1 to max 255 digits) [col 3]
+    9  error  syslog/unifi_udp  syslog_parser  expecting a sequence number (from 1 to max 255 digits) [col 3]
+    9  error  syslog/unifi_udp  udp_input  expecting a sequence number (from 1 to max 255 digits) [col 3]
     1  error  syslog/unifi_udp  udp_input  regex pattern does not match

@@ -1,0 +1,43 @@
+# real frames, scrubbed -- dataset unifi sudo
+# captured from a live UDM gateway and passed through scripts/scrub
+# see tests/README for what is real and what is synthetic
+<85>Aug 13 23:09:08 host-43e7 host-43e7 sudo[2339104]: unifi-user-assets : PWD=/data/unifi-user-assets ; USER=root ; COMMAND=/sbin/ubnt-tools id
+<85>Aug 13 23:08:58 host-43e7 host-43e7 sudo[2338626]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:07:38 host-43e7 host-43e7 sudo[2335873]: ucs-update : PWD=/data/unifi-identity-update ; USER=root ; COMMAND=/sbin/ubnt-tools id
+<85>Aug 13 23:07:35 host-43e7 host-43e7 sudo[2335717]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:06:43 host-43e7 host-43e7 sudo[2334465]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:06:20 host-43e7 host-43e7 sudo[2333710]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/iptables.sh list filter INPUT
+<85>Aug 13 23:06:20 host-43e7 host-43e7 sudo[2333721]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/iptables.sh list nat UBIOS_PREROUTING_USER_HOOK
+<85>Aug 13 23:05:40 host-43e7 host-43e7 sudo[2331823]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:04:40 host-43e7 host-43e7 sudo[2329177]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:03:56 host-43e7 host-43e7 sudo[2327041]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:03:35 host-43e7 host-43e7 sudo[2326158]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:02:11 host-43e7 host-43e7 sudo[2322787]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:00:41 host-43e7 host-43e7 sudo[2318953]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 23:00:04 host-43e7 host-43e7 sudo[2317562]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:59:22 host-43e7 host-43e7 sudo[2315564]: unifi-access : PWD=/data/unifi-access ; USER=root ; COMMAND=/usr/bin/du -sh /data/ai-feature-controller /data/dpi-tracer /data/lost+found /data/postgresql /data/ucs-agent /data/ucs-user-assets /data/udapi-config /data/ui-db /data/uid /data/ulp-go /data/unifi /data/unifi-access /data/unifi-core /data/unifi-credential-server /data/unifi-directory /data/unifi-identity-update /data/unifi-protect /data/unifi-talk /data/unifi-user-assets /data/uos /data/wifiman
+<85>Aug 13 22:59:08 host-43e7 host-43e7 sudo[2315172]: unifi-user-assets : PWD=/data/unifi-user-assets ; USER=root ; COMMAND=/sbin/ubnt-tools id
+<85>Aug 13 22:58:15 host-43e7 host-43e7 sudo[2313429]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:57:39 host-43e7 host-43e7 sudo[2312433]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:57:37 host-43e7 host-43e7 sudo[2312296]: ucs-update : PWD=/data/unifi-identity-update ; USER=root ; COMMAND=/sbin/ubnt-tools id
+<85>Aug 13 22:56:15 host-43e7 host-43e7 sudo[2309448]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:55:22 host-43e7 host-43e7 sudo[2307079]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:55:08 host-43e7 host-43e7 sudo[2306292]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:53:29 host-43e7 host-43e7 sudo[2301364]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:52:47 host-43e7 host-43e7 sudo[2300278]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/iptables.sh list filter INPUT
+<85>Aug 13 22:52:47 host-43e7 host-43e7 sudo[2300289]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/iptables.sh list nat UBIOS_PREROUTING_USER_HOOK
+<85>Aug 13 22:52:30 host-43e7 host-43e7 sudo[2299894]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:51:07 host-43e7 host-43e7 sudo[2297348]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:49:26 host-43e7 host-43e7 sudo[2292497]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:49:26 host-43e7 host-43e7 sudo[2292503]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:49:22 host-43e7 host-43e7 sudo[2292364]: unifi-access : PWD=/data/unifi-access ; USER=root ; COMMAND=/usr/bin/du -sh /data/ai-feature-controller /data/dpi-tracer /data/lost+found /data/postgresql /data/ucs-agent /data/ucs-user-assets /data/udapi-config /data/ui-db /data/uid /data/ulp-go /data/unifi /data/unifi-access /data/unifi-core /data/unifi-credential-server /data/unifi-directory /data/unifi-identity-update /data/unifi-protect /data/unifi-talk /data/unifi-user-assets /data/uos /data/wifiman
+<85>Aug 13 22:49:08 host-43e7 host-43e7 sudo[2291698]: unifi-user-assets : PWD=/data/unifi-user-assets ; USER=root ; COMMAND=/sbin/ubnt-tools id
+<85>Aug 13 22:47:37 host-43e7 host-43e7 sudo[2288592]: ucs-update : PWD=/data/unifi-identity-update ; USER=root ; COMMAND=/sbin/ubnt-tools id
+<85>Aug 13 22:47:36 host-43e7 host-43e7 sudo[2288487]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:46:57 host-43e7 host-43e7 sudo[2287445]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:46:26 host-43e7 host-43e7 sudo[2286382]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:45:46 host-43e7 host-43e7 sudo[2284601]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:45:09 host-43e7 host-43e7 sudo[2283285]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:44:29 host-43e7 host-43e7 sudo[2281809]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:42:36 host-43e7 host-43e7 sudo[2278925]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh
+<85>Aug 13 22:41:32 host-43e7 host-43e7 sudo[2277404]:      uid : PWD=/data/uid ; USER=root ; COMMAND=/usr/lib/uid-agent/scripts/apps_info.sh

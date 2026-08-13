@@ -16,30 +16,47 @@ tests/
 
 ---
 
-## Read this first: the corpus is currently 100% synthetic
+## Read this first: the corpus is hybrid
 
-**Not one frame in `tests/corpus/` came off a wire.** Every frame here was
-written by hand against the shapes documented in this repository. That
-matters, and issue [#3](https://github.com/jamesagarside/unifi-otel/issues/3)
-says why better than this file can:
+**362 frames — 295 real, 67 synthetic.**
+
+Files named `real-*.txt` came off a live UDM gateway and were passed
+through [`scripts/scrub.py`](../scripts/scrub.py). Everything else was
+written by hand against the shapes documented in this repository.
+
+The split matters, and issue
+[#3](https://github.com/jamesagarside/unifi-otel/issues/3) says why
+better than this file can:
 
 > the format's important properties were *discovered*, not predicted. The
 > doubled hostname is the clearest example — nobody hand-writing fixtures
 > invents it, and it is the single thing most likely to break a naive
 > parser.
 
-A synthetic-only corpus is therefore a **weaker artifact than the issue
-asks for**. It can catch a regression — a change that makes today's
-behaviour different from yesterday's — and it does that well. It cannot
-discover a property of UniFi's output that nobody has looked at yet, and
-it cannot validate a parser against hardware nobody here owns. Do not
-read a green run as "the parsers are correct". Read it as "the parsers
-still do what they did when these goldens were written".
+That argument proved itself the first time real frames arrived. Scrubbing
+them exposed two leaks no synthetic fixture could have contained: a
+`linkcheck` speedtest payload carrying a real ISP, its domain, the city,
+coordinates to fifteen decimal places and the reporting device's
+timezone — and, underneath that, the fact that **no domain inside any URL
+had ever been scrubbed anywhere**. Nobody hand-writes a fixture
+containing their own ISP, so nobody would have found it.
 
-The directory is laid out so scrubbed **real** frames can be dropped in
-alongside these — see [Adding a frame](#adding-a-frame). That is the
-upgrade path, and it is the point of
-[`docs/contributing-samples.md`](../docs/contributing-samples.md).
+**What the real frames are, and are not.** They come from one household's
+gateway over seven days. They are real UniFi output, which is what makes
+them worth having. They are not a representative sample of UniFi
+deployments — one site, one hardware generation, one configuration.
+
+**The synthetic frames are still load-bearing** and are not going away.
+They cover edge cases a capture is unlikely to contain on any given week:
+a truncated CEF envelope, an unmapped event code, a 1400-byte frame, a
+line with no tag at all. Real traffic supplies the ordinary; synthetic
+supplies the deliberately awkward.
+
+Still not covered by either: see
+[Known limitations](#known-limitations). Do not read a green
+run as "the parsers are correct" — read it as "the parsers still do what
+they did when these goldens were written", now with a much better idea of
+what they actually did.
 
 ### What rests on observation, and what is invention
 
@@ -54,7 +71,8 @@ upgrade path, and it is the point of
 | The five `dnsmasq-dhcp` shapes, incl. `DHCPDISCOVER` putting a MAC where its siblings put an IP, and `Updating leases` not matching | Observed. |
 | The four `sudo` shapes, incl. vendor service accounts and `pam_unix` | Observed. |
 | `unifi-mq-broker` logs its tag as a **full path** | Observed. |
-| `linkcheck` multi-line JSON becomes one record per line, continuations tagged `syslog_header` | Mechanism observed and reproduced. **Payload shape not observed** — see below. |
+| `linkcheck` multi-line JSON becomes one record per line, continuations tagged `syslog_header` | **Observed, and the frame is real.** `real-linkcheck.txt` is one complete captured frame: a header line ending `speedtest.ui_speedtest_log_results(): {`, then one pretty-printed JSON line per datagram, then a closing `}`. This is what #9 was blocked on. |
+| `linkcheck` is the **only** recurring parse failure | Observed. Every parse-failure record in a 14-day window came from `linkcheck`; nothing else appeared. |
 | SIEM Server emits RFC5424 over TCP, and everything seen on it has been CEF | Observed. |
 | **Every value** — hostname, IP, MAC, domain, SSID, username, policy name, site | **Invented.** They are scrubber-shaped pseudonyms, not scrubbed real data. |
 | The exact **CEF key set per event code** | **Modelled** on the keys `transform/unifi_ecs` reads, not taken from a capture. A real 403 may carry keys this corpus omits. |
@@ -154,8 +172,35 @@ and are not replayed.
 | `device-sudo.txt` | All four `sudo` shapes, including `pam_unix`. |
 | `device-system.txt` | Full-path tag, tag with no `[pid]`, no tag at all, `systemd`, a colon inside the message, switch-shaped `kernel`, AP-shaped `hostapd`, and a frame with no PRI header. |
 | `edge-cases.txt` | Truncated CEF envelope, an unmapped event code, an oversized frame. |
-| `linkcheck-multiline.txt` | The current documented failure of [#9](https://github.com/jamesagarside/unifi-otel/issues/9). |
 | `transport-rfc5424.txt` | The [#25](https://github.com/jamesagarside/unifi-otel/issues/25) axis: the same payload over RFC3164/UDP and RFC5424/TCP. |
+
+**Real frames**, captured from a live gateway and scrubbed. One file per
+dataset, named for it:
+
+| File | Frames |
+| --- | --- |
+| `real-firewall.txt` | 40 |
+| `real-client.txt` | 40 |
+| `real-dns.txt` | 40 |
+| `real-dhcp.txt` | 40 |
+| `real-sudo.txt` | 40 |
+| `real-system.txt` | 40 |
+| `real-audit.txt` | 30 |
+| `real-network.txt` | 8 |
+| `real-security.txt` | 6 |
+| `real-linkcheck.txt` | One complete multi-line frame — the real shape behind [#9](https://github.com/jamesagarside/unifi-otel/issues/9). |
+
+The counts are uneven because they are real: `unifi.security` and
+`unifi.network` are genuinely low-volume on the capture site, and padding
+them would mean inventing frames, which is the thing these files exist to
+avoid.
+
+`real-linkcheck.txt` deliberately holds **one** frame. A real capture
+repeats lines across speedtest results — a closing brace is a closing
+brace — and the harness correlates records to frames by content, so
+repeated lines cannot be paired. It supersedes the synthetic
+`linkcheck-multiline.txt`, which was removed: an invented shape has no
+value once the real one exists.
 
 ### Conventions the harness enforces
 
@@ -319,8 +364,21 @@ moved.
 
 ## Known limitations
 
-- **The corpus is synthetic.** Restated here because it is the most
-  important one. See the top of this file.
+- **The real frames are one site, one week.** 295 of 362 frames came off
+  a single household's UDM gateway over seven days — real UniFi output,
+  but not a representative sample of UniFi deployments, hardware
+  generations or configurations. Frames from other estates remain the
+  most valuable contribution available.
+- **Only the gateway has ever reported.** Every real frame here is from
+  the console. No AP or switch frame has ever been seen
+  ([#20](https://github.com/jamesagarside/unifi-otel/issues/20)), so the
+  single-hostname device shapes are still exercised synthetically only —
+  which is exactly the path
+  [#24](https://github.com/jamesagarside/unifi-otel/issues/24) showed had
+  been silently broken.
+- **Every real frame arrived over UDP/RFC3164.** The RFC5424/TCP pairs
+  are still synthetic
+  ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)).
 - **No fixture trips `transform/cef_extensions`.** A CEF frame whose
   extension string contains no `=` at all would raise inside
   `ParseKeyValue`, and `error_mode: ignore` logs every raise — which

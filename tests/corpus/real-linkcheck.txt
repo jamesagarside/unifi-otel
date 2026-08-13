@@ -1,0 +1,22 @@
+# ONE real linkcheck frame, scrubbed. Captured from a live gateway --
+# this is the actual shape, not a reconstruction.
+#
+# linkcheck pretty-prints its speedtest result and each line arrives
+# as its own datagram. The first line carries a full syslog header;
+# every line after it has none, so the parser tags them syslog_header
+# and routes them to the failure pipeline. See docs/known-issues
+#
+# Only one frame is kept on purpose: real captures repeat lines like
+# the closing brace across results, and the harness correlates
+# records to frames by content, so repeats cannot be paired
+<14>Aug 13 05:08:28 host-43e7 host-43e7 linkcheck[1253]: speedtest.ui_speedtest_log_results(): {
+  "url": "http://203.0.113.201:80",
+  "latitude": 0.0,
+  "longitude": 0.0,
+  "provider": "isp-c468626c94",
+  "providerUrl": "https://3f72b7fc13fa94.example.net",
+  "city": "geo-1f7c8f28",
+  "country": "geo-c2d fd6fbec 72 3e2de 7d8b1a0 2ae fd3430ba 39d6fdc",
+  "countryCode": "ZZ",
+  "speedMbps": 1000
+}

@@ -1,0 +1,43 @@
+# real frames, scrubbed -- dataset unifi dhcp
+# captured from a live UDM gateway and passed through scripts/scrub
+# see tests/README for what is real and what is synthetic
+<30>Aug 13 23:08:31 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 23:08:31 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 23:03:04 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 23:03:04 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 23:02:51 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 23:02:51 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 23:02:36 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 23:02:36 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 23:01:29 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 23:01:29 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 23:00:40 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 23:00:40 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 23:00:02 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 23:00:02 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 22:59:42 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.198 00:00:5e:00:53:0c
+<30>Aug 13 22:59:42 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.198 00:00:5e:00:53:0c host-14153
+<30>Aug 13 22:58:40 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 22:58:40 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 22:58:40 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 22:58:40 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 22:54:06 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 22:54:06 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 22:48:38 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 22:48:38 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 22:47:27 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 22:47:27 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 22:45:21 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 22:45:21 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 22:45:03 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 22:45:03 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 22:44:07 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.198 00:00:5e:00:53:0c
+<30>Aug 13 22:44:07 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.198 00:00:5e:00:53:0c host-14153
+<30>Aug 13 22:43:21 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br101) 198.51.100.18 00:00:5e:00:53:ed
+<30>Aug 13 22:43:21 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br101) 198.51.100.18 00:00:5e:00:53:ed host-275
+<30>Aug 13 22:42:29 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 22:42:29 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 22:38:11 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.72 00:00:5e:00:53:6f
+<30>Aug 13 22:38:11 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.72 00:00:5e:00:53:6f host-4ea
+<30>Aug 13 22:35:24 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPREQUEST(br3) 198.51.100.145 00:00:5e:00:53:fa
+<30>Aug 13 22:35:24 host-43e7 host-43e7 dnsmasq-dhcp[1061101]: DHCPACK(br3) 198.51.100.145 00:00:5e:00:53:fa host-621
