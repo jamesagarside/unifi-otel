@@ -10,10 +10,10 @@ receivers:
   # raw text instead of parsing — parsed records with no timestamp were
   # rejected downstream. The timestamp_guard processor backstops that.
   #
-  # Multi-line payloads are NOT reassembled — each datagram is parsed on
-  # its own, so a pretty-printed JSON frame becomes one record per line
-  # and every line after the first is tagged syslog_header. `linkcheck`
-  # is the known case; see docs/known-issues.md and issue #9.
+  # Multi-line payloads ARE reassembled, but only the one shape that was
+  # verified against a real frame: `linkcheck` speedtest results. See the
+  # recombine operator below and docs/known-issues.md. Every other
+  # multi-line payload is still one record per datagram.
   syslog/unifi_udp:
     udp:
       listen_address: 0.0.0.0:5514
@@ -41,6 +41,91 @@ receivers:
     location: ${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}
     allow_skip_pri_header: true
     operators: &unifi_syslog_operators
+      # ── Reassemble linkcheck's multi-line JSON (issue #9) ──────────
+      # `linkcheck`, the gateway's WAN speedtest daemon, pretty-prints
+      # its result as JSON. Syslog has no continuation line, so each
+      # LINE arrives as its own datagram: the first carries a PRI and an
+      # RFC3164 header, every line after it carries nothing. Without
+      # this operator one frame became one record per line, and every
+      # line after the first was tagged syslog_header and diverted to
+      # the failure pipeline.
+      #
+      # Operators run AFTER the receiver's own syslog parser (the
+      # internal chain is udp_input → syslog_parser → these), so what
+      # arrives here is already parsed: the header line has attributes
+      # and a timestamp, the continuation lines have neither and keep
+      # their raw text in body — with leading whitespace stripped by
+      # the input operator, which is why the reassembled payload is not
+      # byte-identical to what the gateway indented.
+      #
+      # Verified against 0.157.0 with a real captured frame: 11
+      # datagrams in, 1 record out, and the header entry's attributes,
+      # timestamp and severity survive (recombine keeps the first
+      # entry's fields by default).
+      #
+      # THE `if` IS LOAD-BEARING. recombine has no pass-through: an
+      # entry it accepts is appended to the open batch, whatever it is.
+      # Scoping it to linkcheck-shaped entries is what stops an
+      # unrelated frame that happens to arrive mid-payload from being
+      # swallowed. Verified by injecting one: it passes straight
+      # through, unbatched (it may be emitted before the linkcheck
+      # record, since that one waits for its closing brace).
+      #
+      # The header test accepts BOTH gateway hostname shapes. A UDM
+      # doubles its hostname, so RFC3164 leaves the tag in `message`;
+      # a device that does not double it gets `appname` set instead.
+      # Matching only the first shape is exactly the bug in issue #24 —
+      # both are checked here, and both are verified.
+      #
+      # Only one of is_first_entry and is_last_entry may be set, so the
+      # frame is bounded by its closing brace. A frame that never sends
+      # one is not lost and not held for ever: recombine's default
+      # force_flush_period (5s) emits what it has. A well-formed frame
+      # is emitted the moment the brace arrives, with no added latency.
+      #
+      # max_unmatched_batch_size MUST be 0. It defaults to 100, and with
+      # is_last_entry the batch is "unmatched" right up until the
+      # closing brace — so the default SPLITS any frame longer than 100
+      # lines into two records, with no error and no warning. Measured
+      # against 0.157.0: a 152-line frame came out as 2 records at the
+      # default and 1 record at 0. A silent split is the one failure
+      # mode this pipeline is built to avoid, and no real frame is
+      # anywhere near 100 lines, so the default buys nothing and costs
+      # correctness. max_batch_size is left at its default 1000 as a
+      # runaway guard.
+      #
+      # Two kinds of collector log noise are UNAVOIDABLE here and are
+      # not a sign of a broken parser:
+      #   - the receiver logs a syslog_parser and a udp_input error for
+      #     every continuation line (two per line). Those are raised
+      #     inside the receiver, BEFORE any operator runs, so nothing
+      #     here can suppress them. on_error: send_quiet would, but it
+      #     would also silence genuine parse errors on every other
+      #     frame, which is a bad trade.
+      #   - recombine warns once per batched entry that the entry has
+      #     no source_identifier. The default identifier is a FILE
+      #     attribute that no UDP path ever sets, and the continuation
+      #     lines carry no attributes at all, so there is nothing to
+      #     point it at. Harmless: with one gateway there is only ever
+      #     one source, and pooling is what we want.
+      # Both are already dominated by the first bullet, so neither is
+      # worth an extra operator on every record to clean up.
+      #
+      # KNOWN LIMIT: because every entry pools into one batch, two
+      # gateways running a speedtest at the same instant would have
+      # their lines interleaved, and the continuation lines carry no
+      # hostname to demultiplex on. Single-gateway sites are unaffected.
+      - type: recombine
+        if: >-
+          (attributes?.message != nil and attributes.message matches "\\{$"
+          and (attributes?.appname == "linkcheck"
+          or attributes.message matches "(^|\\s)linkcheck\\[[0-9]+\\]:"))
+          or (attributes?.message == nil and body matches "^[\\{\\}\"]")
+        combine_field: body
+        combine_with: "\n"
+        is_last_entry: 'body == "}"'
+        max_unmatched_batch_size: 0
+
       # UniFi is not wholly CEF — only events routed through the SIEM
       # Server are. The operator is conditional, so ordinary syslog
       # passes through with just the RFC3164 fields set.
