@@ -77,6 +77,7 @@ in it. Every one of the following has to survive:
 | `DHCPDISCOVER` putting a MAC where its siblings put an IP | The optional-IP branch of the DHCP pattern. |
 | All four `sudo` shapes, including `pam_unix` auth failures | `user=` instead of `COMMAND=`; different `event.outcome` path. |
 | A frame with no PRI header | `allow_skip_pri_header: true`. |
+| A `linkcheck` frame's line breaks | Each line is a separate datagram, and the `recombine` operator that reassembles them keys off the header line's trailing `{` and a closing `}` alone on the last line. The script is line-oriented and will not disturb this — but it cannot restore it either, so do not join or re-indent the lines before scrubbing. |
 
 **A scrub that "tidies" a malformed frame destroys the only reason that
 fixture exists.** So the script never re-wraps, re-orders, re-cases or
@@ -104,6 +105,43 @@ a spaced SSID to one word would silently delete the test case that
 | ISP names, cities | `isp-…`, `geo-…` | — |
 | Country codes | `ZZ` | ISO 3166-1 user-assigned |
 | ASNs | 64496–64511 | RFC 5398 |
+| Latitude and longitude | `0.0` | — |
+| Timezone names in a payload | `Etc/UTC` | — |
+| The host of a URL (`https://host/…`) | `…example.net` | RFC 2606 |
+
+The last three rows arrived with the first real `linkcheck` capture, and
+they came in two different ways.
+
+Coordinates and timezone are rewritten **by JSON key** rather than by
+shape, alongside `provider`, `providerUrl`, `city`, `country` and
+`countryCode`. The key list is `JSON_VALUE_KINDS`, next to the
+allowlist. None of those values is address-shaped, so the generic sweep
+could not see any of them — which is the hybrid corpus paying for
+itself, because nobody invents a synthetic fixture containing their own
+ISP.
+
+The URL host is a shape rule instead, and it exists because
+`providerUrl` carried live company domains straight through a scrub that
+reported success. The domain pattern deliberately refuses to match after
+a `/`, so that it cannot eat a path segment like `/usr/lib/thing.sh`,
+and the price of that is it cannot see the authority component of a URL
+either. The `://` rule pays it back.
+
+The speedtest fields describe the **server**, not the household, which
+is a fair objection to scrubbing them at all. They are scrubbed anyway
+because a speedtest picks *nearby* servers, so the set of cities across a
+capture is a coarse location fix on whoever ran it, and because
+`timezone` in that payload is not the server's at all — it is the
+reporting device's.
+
+Coordinates all collapse to `0.0` and every timezone to `Etc/UTC` — one
+value each, which makes "is this scrubbed?" a trivial equality test for
+`--check`. Note what that costs, now that `latitude`/`longitude` are
+mapped into `destination.geo.location`: the fixture proves the mapping
+fires and produces a well-formed `{lat, lon}` map, and proves nothing
+about a coordinate that is not null island. If a backend rejects a
+`geo_point` the corpus cannot reproduce it, and that is a gap in the
+corpus rather than in the scrubber.
 
 ### Determinism, and why it is not optional
 

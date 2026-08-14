@@ -484,9 +484,16 @@ _JSON_PAIR_RE = re.compile(
     r'(?:"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?))'
 )
 
-# Every scrubbed coordinate becomes exactly this. Collapsing every server
-# to one point is fine for a fixture -- the parsers do not read it -- and
-# it makes "is this scrubbed?" a trivial equality test for --check.
+# Every scrubbed coordinate becomes exactly this, which makes "is this
+# scrubbed?" a trivial equality test for --check.
+#
+# The parsers DO read these now: since issue #9 the pair feeds
+# destination.geo.location. Collapsing every server to null island is
+# still right for a fixture -- the golden then asserts that the pair was
+# parsed and mapped, which is the behaviour under test, rather than
+# pinning a real location that would have to be scrubbed anyway. Do not
+# add a "skip 0,0" guard to the config to make the fixture look tidier:
+# that would leave the mapping untested.
 SCRUBBED_COORD = "0.0"
 SCRUBBED_TZ = "Etc/UTC"
 

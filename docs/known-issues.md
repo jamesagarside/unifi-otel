@@ -14,11 +14,19 @@ implements them.
 
 | Issue | Symptom | Status |
 | --- | --- | --- |
-| [`linkcheck` multi-line JSON](#linkcheck-multi-line-json-is-not-reassembled--9) | Recurring `syslog_header` parse failures, a few a day | Documented, not fixed — needs a real frame |
+| [`linkcheck` continuation lines still log a receiver error each](#linkcheck-continuation-lines-still-log-a-receiver-error-each--9) | `error`-level lines with a Go stack trace in the collector's own log, a handful a day. No parse-failure record any more | Understood, and not addressable from inside this configuration |
+
+One entry, and it is the residue of a fixed one. The `linkcheck`
+multi-line JSON failure that used to live here **is fixed** — the frame
+is reassembled and parsed into `unifi.speedtest`. What survives is
+collector telemetry that this configuration has no way to reach. The
+history is kept below because the log lines have not changed, so
+somebody who greps for them still needs to land somewhere that explains
+them.
 
 ---
 
-## `linkcheck` multi-line JSON is not reassembled — [#9](https://github.com/jamesagarside/unifi-otel/issues/9)
+## `linkcheck` continuation lines still log a receiver error each — [#9](https://github.com/jamesagarside/unifi-otel/issues/9)
 
 ### What `linkcheck` is
 
@@ -27,53 +35,39 @@ reports the state of the internet connection. Unlike every other daemon
 on the box it emits **pretty-printed, multi-line JSON** over syslog — one
 logical record spread across many lines.
 
-### What happens
+Syslog has no concept of a continuation line. Each line arrives as its
+own datagram, and only the first carries a PRI and an RFC3164 header;
+every line after it is bare text as far as the receiver is concerned.
 
-Syslog has no concept of a continuation line, and neither does the
-receiver: **each datagram is parsed on its own**. A frame spread over ten
-lines therefore becomes ten independent records, and only the first one
-carries a PRI and an RFC3164 header.
+### What used to happen, and what happens now
 
-Traced through the config, in order:
+A `recombine` operator on both syslog receivers
+(`collector/10-receivers-logs.yaml`) reassembles the datagrams of one
+frame into a single record, and the JSON payload is parsed into
+`event.dataset: unifi.speedtest`.
 
-1. `syslog/unifi_udp` (`collector/10-receivers-logs.yaml`) parses the
-   first line normally. The continuation lines have no PRI and no
-   header, so the RFC3164 parser rejects them. Because
-   `allow_skip_pri_header: true` is set, they are **not dropped** — the
-   receiver logs the failure and emits the record anyway, with the raw
-   line in `body` and no `message` attribute.
-2. `transform/tag_parse_failures`
-   (`collector/20-processors-logs.yaml`) sets
-   `unifi.parse_failure = "syslog_header"` on anything where
-   `attributes["message"] == nil`. That is exactly the condition the
-   continuation lines meet — "the syslog parser produced no message
-   attribute".
-3. The `routing/parse_failures` connector
-   (`collector/40-exporters.yaml`) matches
-   `log.attributes["unifi.parse_failure"] != nil` and diverts those
-   records into the `logs/unifi_parse_failures` pipeline instead of the
-   default `logs/unifi_syslog_export`.
-4. That pipeline exports to the same OTLP endpoint as everything else
-   **and** to `debug/parse_failures`, which prints the whole record at
-   `detailed` verbosity into the collector's own log.
-
-Observed against 0.157.0, sending a multi-line JSON payload as separate
-UDP datagrams — one record out per datagram in, and the two kinds of
-record look nothing alike:
-
-| | First line (has the header) | Every continuation line |
+| | Before | Now |
 | --- | --- | --- |
-| `body` | Whatever followed the tag — the opening `{` on its own | The raw line, leading whitespace stripped |
-| `unifi.parse_failure` | *unset* | `syslog_header` |
-| Pipeline | `logs/unifi_syslog_export` (normal path) | `logs/unifi_parse_failures` |
-| `process.name` | `linkcheck` | *unset* |
-| `observer.name` | set | *unset* |
-| `event.original` | set | *unset* |
-| `event.dataset` | `unifi.system` | `unifi.system` |
-| Timestamp | Parsed from the syslog header | Zero, then filled in by `transform/timestamp_guard` with the time the collector saw it |
-| Severity | From the PRI | Unspecified |
+| Records per frame | One per datagram | **One** |
+| Continuation lines | Tagged `unifi.parse_failure = "syslog_header"`, diverted to `logs/unifi_parse_failures` | Appended to the open batch; no record of their own |
+| `event.dataset` | `unifi.system` on every one of them | `unifi.speedtest` on the single record |
+| Payload | Discarded — the header line's `body` was the opening `{` and nothing else | Parsed: rate, test-server URL, ISP and geo |
+| Timestamp | Header line from the syslog header; continuations stamped with collector arrival time | From the syslog header of the first datagram |
+| Severity | Header line from the PRI; continuations unspecified | From the PRI |
 
-Each continuation line also produces one `error`-level line **with a Go
+Observed against 0.157.0 with the one real captured frame in
+`tests/corpus/real-linkcheck.txt`: **11 datagrams in, 1 record out**, the
+header entry's attributes, timestamp and severity carried through.
+
+Reassembly is bounded by the closing `}` rather than by a line count, so
+a frame of a different length still works. A frame that never sends its
+closing brace is **not lost and not held for ever**: `recombine`'s
+default `force_flush_period` of 5s emits what it has. A well-formed
+frame is emitted the instant the brace arrives, with no added latency.
+
+### What you still see
+
+Each continuation line still produces one `error`-level line **with a Go
 stack trace** in the collector's own log, from the receiver:
 
 ```
@@ -81,163 +75,126 @@ Failed to write entry  {... "otelcol.component.id": "syslog/unifi_udp",
  "error": "expecting a sequence number (from 1 to max 255 digits) [col 3]"}
 ```
 
-That is collector telemetry, not a record. It is emitted inside the
-receiver, before any processor in this config can see it, so nothing
-downstream of the receiver suppresses it.
+**This is the one visible symptom that the fix does not remove.** The
+receiver's internal chain is `udp_input → syslog_parser → operators`, so
+the RFC3164 parser has already rejected the bare line and logged it
+before the `recombine` operator — or any processor in this config — gets
+to see the entry. Nothing downstream of the receiver can suppress it.
 
-> The mechanism above is what was demonstrated. The **shape** of a real
-> `linkcheck` frame was not: how many lines it is, whether anything
-> other than the first carries a PRI, and where the frame ends are all
-> unknown here. That is not incidental — it is the entire reason this is
-> documented rather than fixed. See [below](#what-would-fix-it).
+So the rate of these log lines is unchanged. What changed is that they
+no longer correspond to anything: there is no `syslog_header` record in
+your backend to go with them, because the entry they refer to was folded
+into a `unifi.speedtest` record instead of being emitted on its own.
 
-### Expected rate
+The count is exactly what the parse-failure count used to be — one log
+line per continuation line, which is what one failure record used to be
+too. **Roughly five a day** in the single deployment where it was
+measured, scaling with however often your gateway runs a link check.
+Read that as an order of magnitude, not a specification. Hundreds a day,
+or a burst, is something other than `linkcheck` and is worth an issue.
 
-**Roughly five records a day.** That figure is from the single
-deployment where this was observed and should be read as an order of
-magnitude, not a specification. It scales with however often your
-gateway decides to run a link check, and one frame accounts for several
-records, so a site that checks more often will see proportionally more.
+### Residual limitations
 
-If you are seeing hundreds a day, or a burst, something other than
-`linkcheck` is involved and it is worth a look — and worth an issue.
+Three, all of them consequences of the fact that a continuation line
+carries no identifying information whatsoever.
 
-### Why it is benign
+**Two gateways sending to one collector could interleave.** The
+continuation lines have no hostname — nothing distinguishes one
+gateway's `"city": …` line from another's. If two gateways ran a link
+check at the same instant and both reported to the same collector, their
+lines could land in the same batch and produce one nonsense record.
+There is no way to demultiplex them inside `recombine`, because there is
+nothing to key on. **Single-gateway deployments are unaffected**, which
+is every deployment this has been run in; the multi-gateway case is
+reasoned, not observed, and nobody has a two-gateway setup to test it
+against. If you run one and see a merged record, that is worth an issue.
 
-- **It is caught, by design.** The failure gate that tags these records
-  exists precisely so that a frame the parser cannot handle announces
-  itself instead of passing through as plausible-looking output. This is
-  that gate working.
-- **It is isolated.** Tagged records leave the normal export path at the
-  connector. They cannot contaminate a dataset, skew a count of
-  `unifi.dns` or `unifi.dhcp`, or land anywhere a parsed record lands.
-- **Nothing silently mis-parses.** Every field set on every one of these
-  records is correct. The continuation lines assert nothing beyond the
-  raw text in `body` and the module-level attributes every syslog record
-  gets. The header line's record is likewise correct in everything it
-  claims — it is just missing a payload, and its one-character `body`
-  makes that obvious rather than subtle.
-- **Nothing is lost that other datasets carry.** No `dns.question.name`,
-  no `source.ip`, no `user.name` goes missing here, because a
-  `linkcheck` frame never had any of those to give up.
+**A stray brace-leading line waits 5s.** The reassembly predicate is
+scoped to `linkcheck`-shaped traffic, but its second clause has to
+accept header-less lines that begin with `{`, `}` or `"` — that is what
+a continuation line looks like, and there is nothing else to match on.
+If such a line arrives while no frame is open, it opens one, and it is
+emitted alone when the flush period expires. Bounded latency on an
+already-malformed record, not a loss.
 
-Which is to say: the failure output is telling you the truth, and
-leaving these records visible costs you nothing except the need to know
-what they are. Hence this page.
+**Unrelated frames are not swallowed.** This is the failure mode the
+`if` predicate exists to prevent, and it was tested rather than assumed:
+an unrelated syslog frame injected into the middle of a `linkcheck`
+frame passes straight through untouched. It may be emitted slightly
+ahead of the `linkcheck` record, since that one is still waiting for its
+closing brace, which is harmless. Listed here so that a reader who finds
+the operator does not have to wonder.
 
-### What *is* lost
+### How far the verification goes
 
-**The payload.** A `linkcheck` frame carries WAN speedtest results —
-throughput, the ISP, and geo information about the test endpoint. That
-is data **nothing else in this pipeline reports**: it does not arrive
-over CEF from the SIEM feed, it is not derivable from any other syslog
-dataset, and the SNMP module does not poll it either.
+**One real frame, from one gateway.** The predicate matches on the
+`linkcheck[pid]:` tag and a trailing `{`, and it was verified against
+**both** gateway hostname shapes — the doubled hostname a UDM emits, and
+the single-hostname shape that
+[#24](https://github.com/jamesagarside/unifi-otel/issues/24) broke.
 
-So this is a missing feature, not merely noise. The records in the
-failure stream are the visible half; the invisible half is that your
-gateway measures its own WAN performance and none of that reaches your
-backend.
+What that does *not* establish is that every gateway's `linkcheck`
+emits the same payload keys, the same line count, or the same trailing
+`{` on its header line. The captured frame carries `speedMbps` and no
+direction — which is why the field is `unifi.speedtest.speed_mbps` and
+not `download_mbps`, and why this project does not claim upload,
+download or latency are captured. One observation is one observation. A
+`linkcheck` frame from a second gateway is on the wanted list in
+[`contributing-samples.md`](contributing-samples.md) for exactly this
+reason.
 
 ### Confirming this is what you are seeing
+
+Two halves: the record that should now exist, and the log noise that
+should now be unaccompanied.
 
 In the container log, with the debug profile from
 [`quickstart.md`](quickstart.md):
 
 ```bash
+docker compose logs collector-debug | grep -c 'event.dataset: Str(unifi.speedtest)'
 docker compose logs collector-debug | grep -c 'unifi.parse_failure: Str(syslog_header)'
 ```
 
-In your backend, filter on `unifi.parse_failure: "syslog_header"`.
+The first should be non-zero after a link check has run; the second
+should be zero, or should at least not be growing in step with your
+`linkcheck` schedule. A `unifi.speedtest` record carries
+`process.name: linkcheck`, a one-line summary body reading
+`WAN speedtest: … Mbps via …`, the payload fields under `destination.*`
+and `unifi.speedtest.*`, and the whole reassembled multi-line frame in
+`event.original` — which is the thing to look at if the parsed fields
+are not what you expected.
 
-Then identify them, which takes one extra step, because **the failure
-records do not name `linkcheck`**. They have no `process.name` — the tag
-was on the header line, and these are not that line. What you look for
-instead:
+If you are still seeing `syslog_header` failures arriving in tight
+bursts of ten or so, with bodies that are JSON fragments — a bare `{`, a
+`"key": value,` line, a lone `}` — then reassembly is **not** matching
+your gateway's frames. That is a different frame shape from the one
+verified here, and a scrubbed capture of it is worth an issue.
 
-- **Bodies that are JSON fragments**: a bare `{`, a `"key": value,`
-  line, a lone `}`. A fragment is not valid JSON on its own, which is
-  the tell.
-- **The record immediately before them**, on the normal export path,
-  with `process.name: linkcheck`, `event.dataset: unifi.system` and a
-  body of just `{`. That one is the header line, and it is what ties the
-  group to `linkcheck`.
-- **Arrival in a tight burst** — one frame's worth of lines lands within
-  milliseconds — and then nothing for hours.
+`syslog_header` failures that arrive singly, from some other daemon, are
+a different problem again and this entry is not your answer.
 
-If your `syslog_header` failures do *not* look like that, they are a
-different problem and this entry is not your answer. A capture of them
-is worth an issue.
+### The geo and ISP fields describe the far end
 
-### Making it quiet, if you do not care
+`destination.geo.city_name`, `destination.geo.country_name`,
+`destination.as.organization.name` and the rest hang off `destination.*`
+because they describe the **speedtest server**, not your household. That
+is the honest mapping, and it is also why they are not as anonymous as
+`destination.*` makes them sound: a speedtest picks a *nearby* server,
+so the set of cities you see is a coarse location fix on whoever is
+running it. `scripts/scrub.py` scrubs them for that reason, and the
+reason is written down in the allowlist block of the script itself.
+
+### Making the log noise quiet
 
 There is **no configuration flag for this** and this project will not
-invent one; suppressing a failure signal by default is how a parser ends
-up shipping broken and confident.
+invent one. There is also nothing to invent: the lines are produced
+inside the receiver, so no processor, connector or exporter in this
+configuration is downstream of them.
 
-What you can do is filter downstream. Every one of these records carries
-`unifi.parse_failure = "syslog_header"`, and that attribute survives
-export — it is a schema field, not a working attribute, so
-`transform/strip_working_fields` leaves it alone. Drop or route on it in
-your gateway, your ingest pipeline, or your backend's own rules,
-whichever sits between this collector and storage —
-[`destinations.md`](destinations.md) describes what is on the wire and
-says the same thing about this attribute.
-
-Filter on the attribute rather than on the body text. The bodies vary
-with the payload; the tag does not.
-
-### What would fix it
-
-Reassembly needs a `recombine` operator on the receiver, and a
-`recombine` operator needs an exact answer to three questions:
-
-1. How many lines is a frame, and is it fixed?
-2. Does every line carry a PRI, or only the first?
-3. **Where does the frame end** — what marks the last line, and what
-   distinguishes it from an unrelated record that arrived next?
-
-Guessing at any of those produces a parser that works on the frame
-somebody imagined and silently mangles the one that actually arrives.
-This project has a standing rule against shipping parsers verified only
-against synthetic data — it is why AP and switch support is a documented
-gap rather than a claim
-([#20](https://github.com/jamesagarside/unifi-otel/issues/20)), and
-[#24](https://github.com/jamesagarside/unifi-otel/issues/24) is what
-happens when a path is assumed to work rather than tested. Hand-writing
-a fixture here and calling the result verified would repeat exactly that
-mistake, in the one place where the failure would be silent.
-
-**No real `linkcheck` frame is available to this repository.** That is
-the only thing blocking the fix.
-
-#### What to send
-
-A scrubbed real `linkcheck` frame **including every continuation line,
-exactly as it arrived on the wire** — same lines, same order, same
-whitespace, same boundaries. The boundary is the whole difficulty, so a
-frame with the lines joined, trimmed, re-indented or truncated answers
-none of the three questions above and is not usable.
-
-Read [`contributing-samples.md`](contributing-samples.md) first — the
-privacy rules there are not optional, and a `linkcheck` payload carries
-your ISP and your approximate location.
-
-Two things specific to this frame:
-
-- **Capture off the wire, with the socket recipe** in
-  `contributing-samples.md`. The "export `event.original` from your
-  backend" route does **not** work here: as the table above shows, the
-  continuation records have no `event.original` at all. Taking `body`
-  off each failure record in order is a fallback, but a wire capture is
-  better because it preserves the datagram boundaries, which is the
-  thing being asked about.
-- **`scripts/scrub.py` is line-oriented.** It reads and writes one line
-  at a time and will not disturb your line structure — but it also
-  cannot restore it, so preserve it yourself. Do not join the lines
-  before scrubbing, and do not let an editor reflow or strip trailing
-  whitespace on the way past. Check with `diff -u` that only values
-  changed and the line count did not.
-
-Attach it to
-[#9](https://github.com/jamesagarside/unifi-otel/issues/9) as a
-scrubbed file, never as pasted text in a comment.
+What you can do is filter the collector's own logs wherever you collect
+them, on the component id and the error string. There is no
+collector-side setting that reaches these lines without also silencing
+every other receiver-level error, which is the class of error you most
+want to hear about. Records are unaffected either way — nothing is
+routed anywhere on account of these lines.

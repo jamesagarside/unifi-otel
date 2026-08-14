@@ -63,7 +63,7 @@ places:
 
 | Feed | Gives you | Transport |
 | --- | --- | --- |
-| Remote syslog / syslog server | `unifi.dns`, `unifi.dhcp`, `unifi.sudo`, `unifi.system` — the gateway's own Linux logs | RFC3164 over UDP 514 |
+| Remote syslog / syslog server | `unifi.dns`, `unifi.dhcp`, `unifi.sudo`, `unifi.speedtest`, `unifi.system` — the gateway's own Linux logs | RFC3164 over UDP 514 |
 | SIEM Server | `unifi.firewall`, `unifi.security`, `unifi.client`, `unifi.audit` — CEF events from UniFi Network itself | UDP 514, or RFC5424 over TCP 601 |
 
 **On the menu paths: UniFi moves these between releases and I have not
@@ -76,7 +76,7 @@ Logging* section. The SIEM Server option is newer and sits under
 "SIEM" into the Settings search box — that is faster than following a
 stale menu path, including this one.
 
-Enabling only remote syslog is fine. You will get the four device
+Enabling only remote syslog is fine. You will get the five device
 datasets and no CEF, which is still a working install.
 
 ## How to tell it is working
@@ -113,6 +113,14 @@ Two things mean something is wrong:
   matching any specific rule. Worth opening an issue with a redacted
   `event.original`.
 
+One thing that looks wrong and is not: `error`-level lines from the
+receiver reading `Failed to write entry … expecting a sequence number`,
+a handful a day in small bursts. Those are `linkcheck`'s continuation
+datagrams being rejected by the RFC3164 parser *before* the reassembly
+operator can see them. The frame itself is reassembled and does become a
+`unifi.speedtest` record; the log lines are telemetry this configuration
+cannot reach. [`known-issues.md`](known-issues.md) has the detail.
+
 Nothing at all on stdout means the frames are not arriving. Check the
 health endpoint first (`curl -sf http://127.0.0.1:13133` → `{"status":
 "Server available", ...}`), then the host firewall, then that UniFi is
@@ -147,8 +155,13 @@ without logging anything at all.
 CEF records are immune — they are re-stamped from the CEF `UNIFIutcTime`
 field, which is genuine UTC. `unifi.dns` is immune too, for the same
 reason (the coredns payload carries epoch milliseconds). So the damage is
-confined to `unifi.dhcp`, `unifi.sudo` and `unifi.system`, which is
-precisely why it goes unnoticed: your firewall dashboard is fine.
+confined to `unifi.dhcp`, `unifi.sudo`, `unifi.speedtest` and
+`unifi.system`, which is precisely why it goes unnoticed: your firewall
+dashboard is fine.
+
+`unifi.speedtest` is in that group for the same reason as the others: it
+takes its timestamp from the RFC3164 header of its first datagram, and
+the one captured payload carries no time of its own to re-stamp from.
 
 ### Detection recipe
 

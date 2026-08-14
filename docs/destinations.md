@@ -47,10 +47,29 @@ alias mechanism in a log record, and consumers exist for both spellings.
 
 `event.dataset` is one of `unifi.firewall`, `unifi.security`,
 `unifi.client`, `unifi.audit`, `unifi.network`, `unifi.dns`, `unifi.dhcp`,
-`unifi.sudo`, `unifi.system`. Records that failed a parsing stage carry
-`unifi.parse_failure` naming the stage; route or filter on that attribute
-downstream if you want them separated. Resource attributes are
-`service.name: unifi-udm` and `observed.source: unifi-otel`.
+`unifi.sudo`, `unifi.speedtest`, `unifi.system`. Records that failed a
+parsing stage carry `unifi.parse_failure` naming the stage; route or filter
+on that attribute downstream if you want them separated. Resource
+attributes are `service.name: unifi-udm` and
+`observed.source: unifi-otel`.
+
+**One attribute is not a scalar.** Every attribute this collector emits is
+a string, a number or a slice of strings, with a single exception:
+`destination.geo.location`, set only on `unifi.speedtest` records, is a map
+of `lat` and `lon`. It is emitted that way because that is the shape
+Elasticsearch reads as a `geo_point`. What another backend makes of a
+nested map attribute has not been tested against any of the destinations
+below — the likely outcome is that it flattens to
+`destination.geo.location.lat` and `.lon`, which loses the geo type but no
+data. If your backend rejects the record outright rather than flattening
+it, that is worth an issue; dropping the attribute in your gateway is the
+workaround in the meantime.
+
+Those geo fields, and `destination.as.organization.name` alongside them,
+describe the **speedtest server** rather than your own network. That is why
+they sit under `destination.*`. It is also not as anonymous as it sounds —
+speedtests pick nearby servers — so treat a `unifi.speedtest` record as
+carrying a coarse location fix when you decide where it may be stored.
 
 ## Verification status
 
