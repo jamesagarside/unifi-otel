@@ -189,10 +189,10 @@ opentelemetry-collector:
       # raw text instead of parsing — parsed records with no timestamp were
       # rejected downstream. The timestamp_guard processor backstops that.
       #
-      # Multi-line payloads are NOT reassembled — each datagram is parsed on
-      # its own, so a pretty-printed JSON frame becomes one record per line
-      # and every line after the first is tagged syslog_header. `linkcheck`
-      # is the known case; see docs/known-issues.md and issue #9.
+      # Multi-line payloads ARE reassembled, but only the one shape that was
+      # verified against a real frame: `linkcheck` speedtest results. See the
+      # recombine operator below and docs/known-issues.md. Every other
+      # multi-line payload is still one record per datagram.
       syslog/unifi_udp:
         udp:
           listen_address: 0.0.0.0:5514
@@ -220,6 +220,87 @@ opentelemetry-collector:
         location: ${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}
         allow_skip_pri_header: true
         operators: &unifi_syslog_operators
+          # ── Reassemble linkcheck's multi-line JSON (issue #9) ──────────
+          # `linkcheck`, the gateway's WAN speedtest daemon, pretty-prints
+          # its result as JSON. Syslog has no continuation line, so each
+          # LINE arrives as its own datagram: the first carries a PRI and an
+          # RFC3164 header, every line after it carries nothing. Without
+          # this operator one frame became one record per line, and every
+          # line after the first was tagged syslog_header and diverted to
+          # the failure pipeline.
+          #
+          # Operators run AFTER the receiver's own syslog parser (the
+          # internal chain is udp_input → syslog_parser → these), so what
+          # arrives here is already parsed: the header line has attributes
+          # and a timestamp, the continuation lines have neither and keep
+          # their raw text in body — with leading whitespace stripped by
+          # the input operator, which is why the reassembled payload is not
+          # byte-identical to what the gateway indented.
+          #
+          # Verified against 0.157.0 with a real captured frame: 11
+          # datagrams in, 1 record out, and the header entry's attributes,
+          # timestamp and severity survive (recombine keeps the first
+          # entry's fields by default).
+          #
+          # THE `if` IS LOAD-BEARING. recombine has no pass-through: an
+          # entry it accepts is appended to the open batch, whatever it is.
+          # Scoping it to linkcheck-shaped entries is what stops an
+          # unrelated frame that happens to arrive mid-payload from being
+          # swallowed. Verified by injecting one: it passes straight
+          # through, unbatched (it may be emitted before the linkcheck
+          # record, since that one waits for its closing brace).
+          #
+          # The header test accepts BOTH gateway hostname shapes. A UDM
+          # doubles its hostname, so RFC3164 leaves the tag in `message`;
+          # a device that does not double it gets `appname` set instead.
+          # Matching only the first shape is exactly the bug in issue #24 —
+          # both are checked here, and both are verified.
+          #
+          # Only one of is_first_entry and is_last_entry may be set, so the
+          # frame is bounded by its closing brace. A frame that never sends
+          # one is not lost and not held for ever: recombine's default
+          # force_flush_period (5s) emits what it has. A well-formed frame
+          # is emitted the moment the brace arrives, with no added latency.
+          #
+          # max_unmatched_batch_size MUST be 0. It defaults to 100, and with
+          # is_last_entry the batch is "unmatched" right up until the
+          # closing brace — so the default SPLITS any frame longer than 100
+          # lines into two records, with no error and no warning. Measured
+          # against 0.157.0: a 152-line frame came out as 2 records at the
+          # default and 1 record at 0. A silent split is the one failure
+          # mode this pipeline is built to avoid, and no real frame is
+          # anywhere near 100 lines, so the default buys nothing and costs
+          # correctness. max_batch_size is left at its default 1000 as a
+          # runaway guard.
+          #
+          # Two kinds of collector log noise are UNAVOIDABLE here and are
+          # not a sign of a broken parser:
+          #   - the receiver logs a syslog_parser and a udp_input error for
+          #     every continuation line (two per line). Those are raised
+          #     inside the receiver, BEFORE any operator runs, so nothing
+          #     here can suppress them. on_error: send_quiet would, but it
+          #     would also silence genuine parse errors on every other
+          #     frame, which is a bad trade.
+          #   - recombine warns once per batched entry that the entry has
+          #     no source_identifier. The default identifier is a FILE
+          #     attribute that no UDP path ever sets, and the continuation
+          #     lines carry no attributes at all, so there is nothing to
+          #     point it at. Harmless: with one gateway there is only ever
+          #     one source, and pooling is what we want.
+          # Both are already dominated by the first bullet, so neither is
+          # worth an extra operator on every record to clean up.
+          #
+          # KNOWN LIMIT: because every entry pools into one batch, two
+          # gateways running a speedtest at the same instant would have
+          # their lines interleaved, and the continuation lines carry no
+          # hostname to demultiplex on. Single-gateway sites are unaffected.
+          - type: recombine
+            if: >-
+              (attributes?.message != nil and attributes.message matches "\\{$" and (attributes?.appname == "linkcheck" or attributes.message matches "(^|\\s)linkcheck\\[[0-9]+\\]:")) or (attributes?.message == nil and body matches "^[\\{\\}\"]")
+            combine_field: body
+            combine_with: "\n"
+            is_last_entry: 'body == "}"'
+            max_unmatched_batch_size: 0
           # UniFi is not wholly CEF — only events routed through the SIEM
           # Server are. The operator is conditional, so ordinary syslog
           # passes through with just the RFC3164 fields set.
@@ -567,6 +648,31 @@ opentelemetry-collector:
       transform/device_syslog:
         error_mode: ignore
         log_statements:
+          # ---- 0. resync `message` after a reassembly ---------------------
+          # The receiver's recombine operator (issue #9) can only combine
+          # ONE field, and it combines `body`. So on a reassembled record
+          # `body` holds the whole frame while `message` still holds only
+          # what the syslog parser took off the FIRST line — it is stale,
+          # and nothing downstream would say so.
+          #
+          # That matters because section 2 sets `body` from `dev_msg`, and
+          # `dev_msg` comes from `message`. Left alone, reassembly parses a
+          # frame perfectly and then throws the payload away at section 2,
+          # keeping only the first line. The record still looks healthy:
+          # right dataset, right process, right timestamp, no parse
+          # failure — just no payload. Verified before this was added.
+          #
+          # So: if body is multi-line and message is not, message lost the
+          # tail. Put it back. Deliberately NOT scoped to linkcheck — it
+          # states the invariant "message and body agree", which is true of
+          # every record, and any future recombine gets it for free.
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["message"] != nil and IsString(log.body) and IsMatch(log.body, "\\n") and not IsMatch(attributes["message"], "\\n")'
+            statements:
+              - 'set(log.attributes["dev_tail"], log.body)'
+              - 'replace_pattern(log.attributes["dev_tail"], "(?s)^[^\\n]*\\n", "")'
+              - 'set(log.attributes["message"], Concat([log.attributes["message"], log.attributes["dev_tail"]], "\n"))'
           # ---- 1. split the frame, then recover the process tag -----------
           # Two separate jobs, deliberately kept apart. Do not re-merge them:
           # that merge WAS the bug in issue #24.
@@ -612,6 +718,16 @@ opentelemetry-collector:
           # difference between a quiet collector and a noisy one. Keep that
           # property: never let an ExtractPatterns run on a frame that cannot
           # match it.
+          #
+          # dev_msg is captured as (?s:.*) so it can cross newlines. That is
+          # required by the reassembled linkcheck frame (issue #9), whose
+          # `message` is multi-line. Without the (?s:) the two patterns stop
+          # agreeing: the condition still matches, because it only has to
+          # reach "&lt;tag&gt;:&lt;space&gt;", but the extract cannot reach end-of-text
+          # without crossing a newline — so it raises on every frame, and
+          # process.name and process.pid are silently lost. That is the
+          # issue #24 failure mode again, reached by a different route.
+          # Change one of these patterns and you must change the other.
           - context: log
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["message"] != nil'
@@ -621,7 +737,7 @@ opentelemetry-collector:
             conditions:
               - 'attributes["cef_kv"] == nil and attributes["process.name"] == nil and attributes["message"] != nil and IsMatch(attributes["message"], "^(?:\\S+\\s+)*?[A-Za-z0-9_./-]+(?:\\[[0-9]+\\])?:\\s")'
             statements:
-              - 'merge_maps(log.attributes, ExtractPatterns(log.attributes["message"], "^(?:\\S+\\s+)*?(?P<dev_tag>[A-Za-z0-9_./-]+)(?:\\[(?P<dev_pid>[0-9]+)\\])?:\\s+(?P<dev_msg>.*)$"), "upsert")'
+              - 'merge_maps(log.attributes, ExtractPatterns(log.attributes["message"], "^(?:\\S+\\s+)*?(?P<dev_tag>[A-Za-z0-9_./-]+)(?:\\[(?P<dev_pid>[0-9]+)\\])?:\\s+(?P<dev_msg>(?s:.*))$"), "upsert")'
               - 'set(log.attributes["process.name"], log.attributes["dev_tag"])'
               - 'set(log.attributes["process.pid"], Int(log.attributes["dev_pid"])) where log.attributes["dev_pid"] != nil and log.attributes["dev_pid"] != ""'
           # ---- 1c. full-path tag → process.executable + basename ---------
@@ -801,6 +917,85 @@ opentelemetry-collector:
               - 'merge_maps(log.attributes, ExtractPatterns(log.body, "\\suser=(?P<sudo_pam_user>\\S+)\\s*$"), "upsert") where log.attributes["user.name"] == nil and IsMatch(log.body, "\\suser=\\S+\\s*$")'
               - 'set(log.attributes["user.name"], log.attributes["sudo_pam_user"]) where log.attributes["sudo_pam_user"] != nil'
               - 'set(log.attributes["related.user"], [log.attributes["sudo_pam_user"]]) where log.attributes["related.user"] == nil and log.attributes["sudo_pam_user"] != nil'
+          # ---- 5b. linkcheck speedtest → unifi.speedtest -----------------
+          # The gateway's WAN link checker. It pretty-prints its result as
+          # multi-line JSON, which the receiver's recombine operator has
+          # already reassembled into one record (issue #9) — so by the time
+          # this runs, body holds the whole payload.
+          #
+          # Named for the function, not the process, like every other
+          # dataset here: unifi.dns not unifi.coredns, unifi.dhcp not
+          # unifi.dnsmasq-dhcp. unifi.sudo is only process-named because
+          # there the process IS the function.
+          #
+          # The dataset is assigned on process.name alone, BEFORE the
+          # payload is parsed, so a frame whose JSON this config does not
+          # recognise still lands in unifi.speedtest instead of being
+          # buried in unifi.system. Same reasoning as section 5.
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] == "linkcheck"'
+            statements:
+              - 'set(log.attributes["event.dataset"], "unifi.speedtest")'
+              - 'set(log.attributes["event.category"], ["network"])'
+              - 'set(log.attributes["event.type"], ["info"])'
+              - 'set(log.attributes["event.action"], "speedtest_result")'
+              - 'set(log.attributes["event.outcome"], "success")'
+          # The payload is preceded by the emitting function's name, so it
+          # is not a bare object and IsMatch(body, "^\\{") would miss it.
+          # Strip the prefix into a working copy, then parse. (?s) is
+          # required throughout: RE2's . does not cross a newline and this
+          # body is multi-line by construction.
+          - context: log
+            conditions:
+              - 'attributes["cef_kv"] == nil and attributes["process.name"] == "linkcheck" and IsMatch(log.body, "(?s)^speedtest\\.ui_speedtest_log_results\\(\\):\\s*\\{.*\\}\\s*$")'
+            statements:
+              - 'set(log.attributes["dev_st_raw"], log.body)'
+              - 'replace_pattern(log.attributes["dev_st_raw"], "(?s)^speedtest\\.ui_speedtest_log_results\\(\\):\\s*", "")'
+              - 'set(log.attributes["dev_st_kv"], ParseJSON(log.attributes["dev_st_raw"]))'
+          # Mapping runs off the parsed map alone, so a change to how the
+          # payload is recognised above cannot silently half-apply this.
+          #
+          # The geo and ISP fields describe the SPEEDTEST SERVER, not this
+          # site, which is why they hang off destination.* — and why
+          # destination.geo.country_iso_code here is the same ECS field the
+          # CEF branch already sets from UNIFIdstRegion. They are still
+          # worth scrubbing before sharing a capture: a speedtest picks a
+          # NEARBY server, so the city is a coarse fix on the gateway.
+          #
+          # destination.geo.location is a MAP-valued attribute — the only
+          # one this config emits; everything else is a scalar or a string
+          # slice. Elasticsearch reads it as a geo_point. A backend that
+          # cannot take a map will flatten it; see docs/destinations.md.
+          #
+          # The payload's own key is `speedMbps` and it states no
+          # direction, so this is speed_mbps, NOT download_mbps. One real
+          # frame exists and it carries no upload figure and no latency —
+          # do not add fields for those until a frame shows them.
+          - context: log
+            conditions:
+              - 'attributes["dev_st_kv"] != nil'
+            statements:
+              - 'set(log.attributes["url.full"], log.attributes["dev_st_kv"]["url"]) where log.attributes["dev_st_kv"]["url"] != nil'
+              - 'set(log.attributes["url.original"], log.attributes["url.full"]) where log.attributes["url.full"] != nil'
+              # The test endpoint is addressed by IP in every frame seen so
+              # far, but the guard keeps a hostname out of destination.ip.
+              - 'merge_maps(log.attributes, ExtractPatterns(log.attributes["url.full"], "^https?://(?P<dev_st_ip>[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)(?::(?P<dev_st_port>[0-9]+))?"), "upsert") where log.attributes["url.full"] != nil and IsMatch(log.attributes["url.full"], "^https?://[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+")'
+              - 'set(log.attributes["destination.ip"], log.attributes["dev_st_ip"]) where log.attributes["dev_st_ip"] != nil'
+              - 'set(log.attributes["destination.address"], log.attributes["destination.ip"]) where log.attributes["destination.ip"] != nil'
+              - 'set(log.attributes["destination.port"], Int(log.attributes["dev_st_port"])) where log.attributes["dev_st_port"] != nil and log.attributes["dev_st_port"] != ""'
+              - 'set(log.attributes["related.ip"], [log.attributes["destination.ip"]]) where log.attributes["destination.ip"] != nil'
+              - 'set(log.attributes["destination.as.organization.name"], log.attributes["dev_st_kv"]["provider"]) where log.attributes["dev_st_kv"]["provider"] != nil'
+              - 'set(log.attributes["unifi.speedtest.provider.url"], log.attributes["dev_st_kv"]["providerUrl"]) where log.attributes["dev_st_kv"]["providerUrl"] != nil'
+              - 'set(log.attributes["destination.geo.city_name"], log.attributes["dev_st_kv"]["city"]) where log.attributes["dev_st_kv"]["city"] != nil'
+              - 'set(log.attributes["destination.geo.country_name"], log.attributes["dev_st_kv"]["country"]) where log.attributes["dev_st_kv"]["country"] != nil'
+              - 'set(log.attributes["destination.geo.country_iso_code"], log.attributes["dev_st_kv"]["countryCode"]) where log.attributes["dev_st_kv"]["countryCode"] != nil'
+              - 'set(log.attributes["destination.geo.location"], {"lat": Double(log.attributes["dev_st_kv"]["latitude"]), "lon": Double(log.attributes["dev_st_kv"]["longitude"])}) where log.attributes["dev_st_kv"]["latitude"] != nil and log.attributes["dev_st_kv"]["longitude"] != nil'
+              - 'set(log.attributes["unifi.speedtest.speed_mbps"], Double(log.attributes["dev_st_kv"]["speedMbps"])) where log.attributes["dev_st_kv"]["speedMbps"] != nil'
+              # body is the JSON blob, now fully mapped. Replace it with a
+              # readable line rather than indexing the payload twice — the
+              # raw frame is still in event.original.
+              - 'set(log.body, Concat(["WAN speedtest: ", String(log.attributes["unifi.speedtest.speed_mbps"]), " Mbps via ", log.attributes["destination.as.organization.name"]], "")) where log.attributes["unifi.speedtest.speed_mbps"] != nil and log.attributes["destination.as.organization.name"] != nil'
           # ---- 6. everything else → unifi.system -------------------------
           # systemd, mcad, dbus-daemon, ubios-udapi-server, ulogd, earlyoom and
           # the unifi-mq-broker error spam: gateway OS chatter, roughly half of
