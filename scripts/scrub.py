@@ -400,6 +400,13 @@ CEF_VALUE_KINDS = {
     "UNIFIisp": "isp",
     "UNIFIsrcIsp": "isp",
     "UNIFIdstIsp": "isp",
+    # WAN-status frames (UNIFIwanIsp) name the site's OWN provider, which is
+    # the most identifying ISP field of the lot -- the others are usually a
+    # remote party's. Missing here until 2026-08-14, which is how a real ISP
+    # reached tests/corpus/real-network.txt. None of its UNIFIwan* siblings
+    # need a rule: wanId/wanName/wanPort/wanSla/wanLatency are vendor
+    # constants or numbers, and wanSubnet is caught by the generic sweep.
+    "UNIFIwanIsp": "isp",
     "UNIFIdstCity": "geo",
     "UNIFIsrcCity": "geo",
     "UNIFIdstRegion": "geo_code",
@@ -518,6 +525,14 @@ PREFIXES = {
     "zone": "zone-",
     "pol": "pol-",
 }
+
+# Kinds allowed below the usual four-character floor for literal substitution,
+# and the floor they get instead. See _remember for why this is only safe
+# because _apply_literals anchors on non-word boundaries. Keep this set small
+# and justified: every entry is a licence to rewrite two-character tokens
+# throughout the corpus.
+SHORT_LITERAL_KINDS = frozenset({"isp"})
+SHORT_LITERAL_MIN = 2
 
 _PSEUDONYM_RE = re.compile(
     r"^(?:" + "|".join(sorted(p[:-1] for p in PREFIXES.values())) + r")-"
@@ -651,8 +666,15 @@ class Finding:
         if show_values:
             shown = self.value
         else:
-            head = self.value[:2]
-            shown = "{}<redacted {} chars>".format(head, len(self.value))
+            # The head is a reading aid, and must never BE the value: a
+            # two-letter carrier brand was printed in full by the very gate
+            # that exists to keep it out of public CI logs. Anything short
+            # enough for the head to give it away is redacted whole.
+            head = self.value[:2] if len(self.value) > 4 else ""
+            # Count what is HIDDEN, not the total length -- the old wording
+            # read as "<head> plus N more characters" when N was the whole
+            # value, overstating how much had actually been withheld.
+            shown = "{}<redacted {} chars>".format(head, len(self.value) - len(head))
         return "{}:{}: {}: {}".format(self.path, self.line, self.kind, shown)
 
 
@@ -703,12 +725,27 @@ class Scrubber:
         if self._record:
             self.findings.append(Finding(self._path, self._line, kind, value))
 
-    def _remember(self, original: str, replacement: str) -> None:
+    def _remember(self, original: str, replacement: str, kind: str = "") -> None:
         # Short strings make terrible literals: a three-character hostname
         # would carpet-bomb the corpus. Allowlisted values never enter the
         # table, and neither does anything that is a word inside an
         # allowlisted phrase ("Internet" must not eat "Internet 1").
-        if len(original) < 4 or original == replacement:
+        #
+        # ISP names are the exception, and need their own floor: national
+        # carriers routinely have two-letter brand names, so the blanket
+        # minimum silently excluded exactly the values most worth catching
+        # in prose. WAN-status frames put the provider in UNIFIwanIsp= and
+        # then again inside msg=, as "Internet connection WAN1 (<isp>) went
+        # down ...", so the field rule alone leaves the name sitting in the
+        # sentence. Safe to lower only because _apply_literals anchors every
+        # match between non-word characters, so a two-letter literal cannot
+        # bite into a longer token.
+        #
+        # No real provider name appears in this comment on purpose: an
+        # example here would reintroduce, in the clear, the leak the rule
+        # exists to close.
+        minimum = SHORT_LITERAL_MIN if kind in SHORT_LITERAL_KINDS else 4
+        if len(original) < minimum or original == replacement:
             return
         low = original.casefold()
         if low in ALLOWLIST_VALUES:
@@ -792,7 +829,7 @@ class Scrubber:
         self._name_map[value.casefold()] = replacement
         if replacement != value:
             self._note(kind, value)
-            self._remember(value, replacement)
+            self._remember(value, replacement, kind)
         return replacement
 
     # ── addresses ────────────────────────────────────────────────────
