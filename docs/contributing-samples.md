@@ -212,16 +212,23 @@ Not clean — findings go to **stdout**, one per line, and the summary to
 
 ```
 scrub.py: FAIL -- 40 unscrubbed value(s) across 1 file(s). Run `python3 scripts/scrub.py <file> -o <file>` before committing.
-capture.txt:1: host: Ro<redacted 5 chars>
-capture.txt:3: domain: ad<redacted 19 chars>
-capture.txt:11: ssid: Ga<redacted 13 chars>
-capture.txt:11: name-in-text: ja<redacted 13 chars>
+capture.txt:1: host: Ro<redacted 3 chars>
+capture.txt:3: domain: ad<redacted 17 chars>
+capture.txt:11: ssid: Ga<redacted 11 chars>
+capture.txt:11: name-in-text: ja<redacted 11 chars>
+capture.txt:14: isp: <redacted 2 chars>
 ```
 
 Values are **redacted by default, deliberately**: a privacy gate that
 echoes the leaked value into a public CI log has defeated its own
 purpose. Add `--show-values` when you need to see what tripped it, and
 only locally.
+
+The count is how many characters are **hidden**, not the length of the
+whole value. Anything four characters or shorter is redacted entire,
+with no leading pair — otherwise the two-character head would give away
+the whole value, which is what the last line above would otherwise have
+done.
 
 This same command is the CI corpus privacy gate
 ([#11](https://github.com/jamesagarside/unifi-otel/issues/11)), so
