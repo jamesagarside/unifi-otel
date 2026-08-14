@@ -70,7 +70,7 @@ jobs:
       latest: ${{ steps.resolve.outputs.latest }}
       same: ${{ steps.resolve.outputs.same }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Resolve
         id: resolve
