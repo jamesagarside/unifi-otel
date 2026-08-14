@@ -19,9 +19,9 @@ tests/
 
 ## Read this first: the corpus is hybrid
 
-**352 frames — 285 real, 67 synthetic.**
+**356 frames — 285 real, 71 synthetic.**
 
-A frame is not always a line. 352 frames go out as **362 wire units**
+A frame is not always a line. 356 frames go out as **366 wire units**
 (datagrams, or newline-delimited records on TCP), because the one
 `linkcheck` frame is eleven datagrams that the receiver recombines into
 a single record. See [Multi-line frames](#multi-line-frames).
@@ -79,7 +79,8 @@ what they actually did.
 | `unifi-mq-broker` logs its tag as a **full path** | Observed. |
 | `linkcheck` pretty-prints its JSON and sends **one datagram per line**, only the first carrying a syslog header | **Observed, and the frame is real.** `real-linkcheck.txt` is one complete captured frame: a header line ending `speedtest.ui_speedtest_log_results(): {`, then one pretty-printed JSON line per datagram, then a closing `}`. This is what #9 was blocked on. The receiver now recombines them into one record; the corpus still sends eleven datagrams, because that is what the gateway does. |
 | `linkcheck` is the **only** recurring parse failure | Observed. Every parse-failure record in a 14-day window came from `linkcheck`; nothing else appeared. |
-| SIEM Server emits RFC5424 over TCP, and everything seen on it has been CEF | Observed. |
+| SIEM Server *offers* RFC5424 over TCP | **Vendor option, not an observation.** It is a setting in the UniFi UI. **No RFC5424 frame of any kind has ever reached this project** — the seven-day capture contains zero, because the source gateway's SIEM Server is set to UDP. An earlier version of this table said "everything seen on it has been CEF", which was true only in the sense that nothing had been seen on it at all. |
+| A CEF frame over RFC5424 carries `APP-NAME` = `CEF` | **Invented**, and it is the single assumption the transport axis leans on hardest. Measured against 0.157.0: with `APP-NAME` set to `CEF` or to NILVALUE the record matches its UDP twin, but with a real app name the RFC5424 record gains `process.name` and `process.pid` that the UDP twin never has — and the matched pair would fail, correctly. Green here means somebody chose that field's value, not that anybody measured it ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)). |
 | **Every value** — hostname, IP, MAC, domain, SSID, username, policy name, site | **Invented.** They are scrubber-shaped pseudonyms, not scrubbed real data. |
 | The exact **CEF key set per event code** | **Modelled** on the keys `transform/unifi_ecs` reads, not taken from a capture. A real 403 may carry keys this corpus omits. |
 | Code 801 with `act=allowed` | **Assumed.** The allowed side of a firewall policy has not been seen under 801. |
@@ -139,14 +140,15 @@ any one failing exits non-zero.
 
 | Check | What it asserts |
 | --- | --- |
-| corpus structure | Frames are unique; matched-pair files hold an even number of frames and each pair really differs only in the way it claims to. A malformed `#[frame]` block — unterminated, nested, stray close, empty — exits 2 during loading, before this check runs at all. |
+| corpus structure | Frames are unique; matched-pair files hold an even number of frames and each pair really differs only in the way it claims to. The RFC3164 member of a **transport** pair must carry a *single* hostname — RFC5424 has no doubled-hostname shape, so a doubled frame would vary two axes at once. A malformed `#[frame]` block — unterminated, nested, stray close, empty — exits 2 during loading, before this check runs at all. |
+| both syslog receivers exercised | At least one RFC3164/UDP frame, at least one RFC5424/TCP frame, at least one transport pair. Same reasoning as bar 4's refusal to pass on zero CEF frames: deleting both members of a transport pair keeps the pair count even and every other bar green, while leaving `syslog/unifi_tcp` entirely untested. Every real frame this project holds arrived over UDP, so the RFC5424 ones are exactly the ones somebody might reasonably prune. |
 | privacy gate | `python3 scripts/scrub.py --check tests/corpus/*.txt` exits 0. This is the command issue [#11](https://github.com/jamesagarside/unifi-otel/issues/11) will gate on, run here so a PR fails locally first. |
 | every frame produced exactly one record | No frame silently dropped, no frame fanned out, no record the harness cannot attribute to a frame. One record per **frame**, not per datagram: a multi-line frame that came back as one record per line shows up here as one missing frame and N orphan records. |
 | **bar 1** — zero OTTL errors | No `error` or `warn` line from any processor or exporter. Receiver-level errors are counted separately and pinned by `golden/_telemetry.golden` rather than waved through. |
 | **bar 2** — exactly one dataset, none on the fallback | Every record carries exactly one `event.dataset`, and none is left on `unifi.syslog`, which is the transient value the non-CEF branch assigns before refinement. |
 | **bar 3** — no working attributes survive | No attribute key matches `transform/strip_working_fields`' own regex — `cef_`, `dev_`, `dns_kv`, `dhcp_`, `sudo_`, and the syslog parser's raw fields. The regex is lifted verbatim from the config so this asserts what the config claims, not a paraphrase of it. |
 | **bar 4** — CEF path byte-identical without the device transform | A second collector is started with `transform/device_syslog` removed from the pipeline, the CEF frames are replayed into it, and the normalised records must be identical. Scope is derived from run A — every frame whose record carries `event.provider: unifi-network`, i.e. every frame that actually went through the CEF branch — so it cannot silently shrink to zero frames. If it finds none, it **fails**. |
-| **bar 5** — matched pairs agree | Beyond the issue's four. Every declared pair must agree on dataset, populated key set, severity and parse-failure status, and both members must carry an `event.original` byte-equal to the frame sent. That last clause is issue [#24](https://github.com/jamesagarside/unifi-otel/issues/24)'s added acceptance criterion: `event.original` is the one field whose absence looks like nothing is wrong. |
+| **bar 5** — matched pairs agree | Beyond the issue's four. Every declared pair must agree on dataset, populated key set, severity and parse-failure status; both members must carry an `event.original` byte-equal to the frame sent; every shared attribute must hold the **same value**, not merely be present; and neither member may still have the whole raw frame sitting in `body`. `event.original` byte-equality is [#24](https://github.com/jamesagarside/unifi-otel/issues/24)'s added criterion — the one field whose absence looks like nothing is wrong. Value equality and the `body` clause are [#25](https://github.com/jamesagarside/unifi-otel/issues/25)'s: key-set equality alone passes a regression that fills a field from the wrong capture group, and "raw frame still in `body`" is precisely what #24 looked like. **Transport** pairs additionally require equal `body`. Hostname pairs do not, and cannot — see [One thing the corpus turned up](#one-thing-the-corpus-turned-up). Timestamps are never compared: an RFC3164 frame is stamped in `UNIFI_SYSLOG_TIMEZONE` while its RFC5424 twin carries an explicit offset, so the two legitimately differ by the zone, and the goldens pin both. |
 | goldens match | The normalised records equal the committed goldens, file by file. |
 
 Bars 2–5 are the point. Bar 1 alone would pass a regression that silently
@@ -216,7 +218,7 @@ empty block.
 | `device-sudo.txt` | All four `sudo` shapes, including `pam_unix`. |
 | `device-system.txt` | Full-path tag, tag with no `[pid]`, no tag at all, `systemd`, a colon inside the message, switch-shaped `kernel`, AP-shaped `hostapd`, and a frame with no PRI header. |
 | `edge-cases.txt` | Truncated CEF envelope, an unmapped event code, an oversized frame. |
-| `transport-rfc5424.txt` | The [#25](https://github.com/jamesagarside/unifi-otel/issues/25) axis: the same payload over RFC3164/UDP and RFC5424/TCP. |
+| `transport-rfc5424.txt` | The [#25](https://github.com/jamesagarside/unifi-otel/issues/25) axis: the same payload over RFC3164/UDP and RFC5424/TCP. Seven pairs — `coredns`, `dnsmasq-dhcp`, `sudo`, `systemd` with RFC5424 `STRUCTURED-DATA` and a `MSGID`, CEF, a full-path `APP-NAME`, and a NILVALUE `APP-NAME` with the tag left inside the message. Wholly invented; see the honesty note at the top of the file. |
 
 **Real frames**, captured from a live gateway and scrubbed. One file per
 dataset, named for it:
@@ -257,7 +259,13 @@ value once the real one exists.
   file is not a pair file and the run fails before any container starts.
 
 - **`transport-*.txt` are transport matched-pair files.** RFC3164 first,
-  RFC5424 second.
+  RFC5424 second, and the RFC3164 member must carry a **single**
+  hostname. RFC5424 has no doubled-hostname shape, so pairing a doubled
+  frame against one would vary the hostname axis and the transport axis
+  together, and a pair that varies two things proves neither. It is also
+  what makes `body` comparable across a transport pair at all: the two
+  hostname shapes are known to disagree on `body`, the two wire formats
+  are not.
 
 - **Transport is chosen by the frame's own syntax.** A frame matching
   `<PRI>1 ` is RFC5424 and goes to the TCP receiver on 6601; everything
@@ -453,7 +461,7 @@ moved.
 
 ## Known limitations
 
-- **The real frames are one site, one week.** 285 of 352 frames came off
+- **The real frames are one site, one week.** 285 of 356 frames came off
   a single household's UDM gateway over seven days — real UniFi output,
   but not a representative sample of UniFi deployments, hardware
   generations or configurations. Frames from other estates remain the
@@ -465,9 +473,28 @@ moved.
   which is exactly the path
   [#24](https://github.com/jamesagarside/unifi-otel/issues/24) showed had
   been silently broken.
-- **Every real frame arrived over UDP/RFC3164.** The RFC5424/TCP pairs
-  are still synthetic
-  ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)).
+- **Every real frame arrived over UDP/RFC3164, and no RFC5424 frame has
+  ever been seen at all.** The seven RFC5424/TCP pairs are wholly
+  synthetic ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)).
+  What they can honestly prove is bounded: that a *well-formed* RFC5424
+  frame carrying a known payload comes out of this pipeline as the same
+  record its RFC3164 twin does. They cannot prove UniFi ever sends one,
+  and they cannot prove it looks like this if it does. The `APP-NAME` on
+  the CEF pair is the assumption most likely to be wrong — see the
+  observation-versus-invention table above, and the capture recipe in
+  [`docs/contributing-samples.md`](../docs/contributing-samples.md).
+- **Bar 3 cannot tell "stripped" from "never produced" for the
+  RFC5424-only working fields.** `version`, `msg_id` and
+  `structured_data` are named in `transform/strip_working_fields` and
+  only RFC5424 populates them. Bar 3 asserts they do not survive to
+  export, which stays green whether they were removed or were never set
+  in the first place. Measured directly against 0.157.0 with the strip
+  processor lifted out of the pipeline: `version` is set on **every**
+  RFC5424 record, and `msg_id` and `structured_data` on the `systemd`
+  pair, so the clauses are not vacuous today — but nothing in the
+  harness would notice if that changed. Proving it continuously would
+  need a third container run, which has not been judged worth its
+  minute.
 - **No fixture trips `transform/cef_extensions`.** A CEF frame whose
   extension string contains no `=` at all would raise inside
   `ParseKeyValue`, and `error_mode: ignore` logs every raise — which

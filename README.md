@@ -25,7 +25,7 @@ the parsing works there first, even if you are heading for Kubernetes.
 | UniFi Network events via the **SIEM Server** feed (CEF) | **Parsed.** Per-code taxonomy for the codes observed live (201, 202, 203, 401–405, 544, 546, firewall policy events); an unseen code still lands in `unifi.network` rather than falling out of the schema. |
 | **Gateway/console device syslog** (RFC3164 over UDP) | **Parsed** into five datasets — `coredns`, `dnsmasq-dhcp`, `sudo`, `linkcheck`, and everything else. |
 | **AP and switch syslog** | **Unverified.** The parsers exist and are believed correct, but **no real AP or switch frame has ever been seen by this project** ([#20](https://github.com/jamesagarside/unifi-otel/issues/20)). The shape is exercised by synthetic replay only. Not a support claim. |
-| **Non-CEF RFC5424 over TCP** | **Under-tested** ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)). The receiver shares the operators and processor chain with the UDP path, but whether UniFi emits non-CEF device syslog over 5424 at all is an open question, and no real frame exists to check against. |
+| **RFC5424 over TCP** | **Exercised, never observed** ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)). The receiver shares the operators and processor chain with the UDP path and is covered by seven matched pairs, but **no RFC5424 frame of any kind has ever reached this project** — the source gateway's SIEM Server is set to UDP. Every one of those pairs is invented. Whether UniFi emits *non-CEF* device syslog over 5424 at all is a further open question, and likely no: the transport choice belongs to the SIEM Server feed, which is CEF-only, while device syslog comes from Remote syslog, which offers UDP alone. |
 | **UniFi Protect, Access and Talk** | **No path in at all** ([#21](https://github.com/jamesagarside/unifi-otel/issues/21)). The SIEM feed is Network-only — its CEF header is always `Ubiquiti\|UniFi Network`. The only other route is the Alarm Manager webhook, which is deliberately absent: for Network events it duplicated syslog exactly, and syslog is the superset. |
 | **SNMP metrics** | **Opt-in, off by default** ([`docs/snmp.md`](docs/snmp.md)). Three extra `--config` flags and SNMPv3 credentials. It reaches the **console only**, and CI cannot cover it. |
 | **Per-port / per-device counters** from adopted APs and switches | **Not available.** Those devices serve no SNMP agent. A UniFi limitation, not a gap here. |
@@ -93,7 +93,7 @@ being dropped. The field-by-field reasoning lives in the comments of
 
 ## How this is tested
 
-A corpus of **352 frames in 20 files** is replayed through the **real,
+A corpus of **356 frames in 20 files** is replayed through the **real,
 pinned collector image** and diffed against committed golden files. It
 runs on every pull request and every push to `main`, as the `corpus
 replay + privacy gate` job in
@@ -109,9 +109,16 @@ reported separately:
 4. the CEF path is byte-identical with and without the device-syslog
    transform, and **fails** rather than passing vacuously if it finds no
    CEF frames;
-5. 26 matched pairs — 21 hostname shapes, 5 transport — agree on
-   dataset, populated key set, severity and parse-failure status, with
-   `event.original` byte-equal to the frame sent.
+5. 28 matched pairs — 21 hostname shapes, 7 transport — agree on
+   dataset, populated key set, severity, parse-failure status and every
+   shared attribute **value**, with `event.original` byte-equal to the
+   frame sent and the raw frame gone from `body`.
+
+A precheck ahead of them refuses to pass unless **both** syslog receivers
+are exercised. Every real frame here arrived over UDP, so the RFC5424
+ones are exactly the ones somebody might reasonably prune — and pruning
+them would leave `syslog/unifi_tcp` entirely untested with every bar
+still green.
 
 Bar 5 exists because of
 [#24](https://github.com/jamesagarside/unifi-otel/issues/24), where
@@ -129,8 +136,8 @@ drift.
 **What this does not prove**, stated plainly:
 
 - **The corpus is hybrid, and every real frame came from one gateway.**
-  285 of the 352 frames were captured from a live UDM and scrubbed; the
-  other 67 are synthetic. A synthetic frame was written by someone who
+  285 of the 356 frames were captured from a live UDM and scrubbed; the
+  other 71 are synthetic. A synthetic frame was written by someone who
   had already read the parser, so it can only encode properties already
   known — read a green run on that portion as "the parsers still do what
   they did when the goldens were written", not as "the parsers are
@@ -179,8 +186,13 @@ frame** from hardware the maintainer does not own. In rough order of
 value:
 
 - an AP or switch frame ([#20](https://github.com/jamesagarside/unifi-otel/issues/20));
-- a non-CEF RFC5424 device frame, if such a thing exists
-  ([#25](https://github.com/jamesagarside/unifi-otel/issues/25));
+- **any** RFC5424 frame, CEF or otherwise
+  ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)) — none
+  has ever been seen, so the whole TCP receiver rests on invented
+  fixtures. There is a step-by-step capture recipe in
+  [`docs/contributing-samples.md`](docs/contributing-samples.md),
+  including the one field (`APP-NAME`) whose real value would settle the
+  biggest assumption in the corpus;
 - Protect or Access alarms, from someone who runs that hardware
   ([#21](https://github.com/jamesagarside/unifi-otel/issues/21));
 - a `linkcheck` frame from a **second** gateway, with every continuation
