@@ -23,19 +23,19 @@ the parsing works there first, even if you are heading for Kubernetes.
 | Area | Status |
 | --- | --- |
 | UniFi Network events via the **SIEM Server** feed (CEF) | **Parsed.** Per-code taxonomy for the codes observed live (201, 202, 203, 401–405, 544, 546, firewall policy events); an unseen code still lands in `unifi.network` rather than falling out of the schema. |
-| **Gateway/console device syslog** (RFC3164 over UDP) | **Parsed** into four datasets — `coredns`, `dnsmasq-dhcp`, `sudo`, and everything else. |
+| **Gateway/console device syslog** (RFC3164 over UDP) | **Parsed** into five datasets — `coredns`, `dnsmasq-dhcp`, `sudo`, `linkcheck`, and everything else. |
 | **AP and switch syslog** | **Unverified.** The parsers exist and are believed correct, but **no real AP or switch frame has ever been seen by this project** ([#20](https://github.com/jamesagarside/unifi-otel/issues/20)). The shape is exercised by synthetic replay only. Not a support claim. |
 | **Non-CEF RFC5424 over TCP** | **Under-tested** ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)). The receiver shares the operators and processor chain with the UDP path, but whether UniFi emits non-CEF device syslog over 5424 at all is an open question, and no real frame exists to check against. |
 | **UniFi Protect, Access and Talk** | **No path in at all** ([#21](https://github.com/jamesagarside/unifi-otel/issues/21)). The SIEM feed is Network-only — its CEF header is always `Ubiquiti\|UniFi Network`. The only other route is the Alarm Manager webhook, which is deliberately absent: for Network events it duplicated syslog exactly, and syslog is the superset. |
 | **SNMP metrics** | **Opt-in, off by default** ([`docs/snmp.md`](docs/snmp.md)). Three extra `--config` flags and SNMPv3 credentials. It reaches the **console only**, and CI cannot cover it. |
 | **Per-port / per-device counters** from adopted APs and switches | **Not available.** Those devices serve no SNMP agent. A UniFi limitation, not a gap here. |
-| `linkcheck` **multi-line JSON** | **Known parse failure** ([#9](https://github.com/jamesagarside/unifi-otel/issues/9)). Continuation lines are tagged `syslog_header` and routed to the failure stream rather than mis-parsed. Documented in [`docs/known-issues.md`](docs/known-issues.md), including what a fix would need. |
+| `linkcheck` **multi-line JSON** | **Parsed** ([#9](https://github.com/jamesagarside/unifi-otel/issues/9)). A `recombine` operator reassembles the datagrams of one pretty-printed frame into a single record, and the payload becomes `unifi.speedtest`. Verified against **one real captured frame, from one gateway** — the operator is scoped to that shape and nothing else is reassembled. The residual log noise and the multi-gateway caveat are in [`docs/known-issues.md`](docs/known-issues.md). |
 | **Backend routing** (index, data stream, sourcetype) | **Not shipped, by design.** Records carry `event.dataset`; a backend that routes on a different field — Elasticsearch routes on `data_stream.dataset` — needs that mapping in your own gateway. See [`docs/destinations.md`](docs/destinations.md). |
 
 ## Datasets
 
 Every record leaves with exactly one `event.dataset`. Five come from the
-CEF feed, four from device syslog.
+CEF feed, five from device syslog.
 
 | `event.dataset` | Source | Carries |
 | --- | --- | --- |
@@ -47,6 +47,7 @@ CEF feed, four from device syslog.
 | `unifi.dns` | device syslog, `coredns` | DNS **block** decisions only — `dns.question.name`, `rule.category`, client IP/MAC. It is not a record of every lookup |
 | `unifi.dhcp` | device syslog, `dnsmasq-dhcp` | DISCOVER / OFFER / REQUEST / ACK: MAC → IP → hostname → bridge interface, which is the join key for the other datasets |
 | `unifi.sudo` | device syslog, `sudo` | privileged execution: user, effective user, working directory, command line, and `event.outcome` including the failure lines |
+| `unifi.speedtest` | device syslog, `linkcheck` | WAN speedtest results, reassembled from a pretty-printed multi-line JSON frame: the measured rate in `unifi.speedtest.speed_mbps`, the test endpoint in `url.full` and `destination.ip`/`destination.port`, and the test server's ISP and geo under `destination.as.*` and `destination.geo.*`. The only dataset here that describes the far end rather than your own network |
 | `unifi.system` | device syslog, everything else | `systemd`, `mcad`, `ubios-udapi-server`, `ulogd`, `earlyoom` and similar. Syslog envelope, process name and pid, severity from the PRI; per-daemon internal formats are not parsed yet |
 
 `unifi.syslog` is a transient value the non-CEF branch assigns before
@@ -92,7 +93,7 @@ being dropped. The field-by-field reasoning lives in the comments of
 
 ## How this is tested
 
-A corpus of **76 frames in 11 files** is replayed through the **real,
+A corpus of **352 frames in 20 files** is replayed through the **real,
 pinned collector image** and diffed against committed golden files. It
 runs on every pull request and every push to `main`, as the `corpus
 replay + privacy gate` job in
@@ -127,12 +128,18 @@ drift.
 
 **What this does not prove**, stated plainly:
 
-- **The corpus is currently 100% synthetic.** Not one frame came off a
-  wire, which is why [#3](https://github.com/jamesagarside/unifi-otel/issues/3)
-  is still open. Every frame was written by someone who had already read
-  the parser, so it can only encode properties already known. Read a
-  green run as "the parsers still do what they did when the goldens were
-  written", not as "the parsers are correct".
+- **The corpus is hybrid, and every real frame came from one gateway.**
+  285 of the 352 frames were captured from a live UDM and scrubbed; the
+  other 67 are synthetic. A synthetic frame was written by someone who
+  had already read the parser, so it can only encode properties already
+  known — read a green run on that portion as "the parsers still do what
+  they did when the goldens were written", not as "the parsers are
+  correct". The real frames do not carry that circularity, but they are
+  one model of gateway on one site: no AP or switch has ever sent a
+  frame here ([#20](https://github.com/jamesagarside/unifi-otel/issues/20)),
+  and the capture contained no RFC5424 at all
+  ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)), so
+  those shapes remain synthetic-only.
 - **CI proves the log path only.** SNMP polls *outward* to a live device
   on a schedule — there is no frame to replay, so CI can only prove the
   SNMP config parses and builds, never that the OIDs still return what
@@ -161,8 +168,9 @@ would make everyone else's install a fork.
 [`docs/known-issues.md`](docs/known-issues.md). An entry earns a place
 there if a working deployment produces visible evidence of it — records
 in the parse-failure stream, errors in the container log, or a field
-conspicuously absent. One entry today: the `linkcheck` multi-line JSON
-failure.
+conspicuously absent. One entry today: `linkcheck`'s continuation lines
+still make the receiver log an error each, even though the frame they
+belong to is now reassembled and no failure record is produced.
 
 ## Contributing
 
@@ -171,12 +179,14 @@ frame** from hardware the maintainer does not own. In rough order of
 value:
 
 - an AP or switch frame ([#20](https://github.com/jamesagarside/unifi-otel/issues/20));
-- a `linkcheck` frame with every continuation line intact
-  ([#9](https://github.com/jamesagarside/unifi-otel/issues/9));
 - a non-CEF RFC5424 device frame, if such a thing exists
   ([#25](https://github.com/jamesagarside/unifi-otel/issues/25));
 - Protect or Access alarms, from someone who runs that hardware
-  ([#21](https://github.com/jamesagarside/unifi-otel/issues/21)).
+  ([#21](https://github.com/jamesagarside/unifi-otel/issues/21));
+- a `linkcheck` frame from a **second** gateway, with every continuation
+  line intact ([#9](https://github.com/jamesagarside/unifi-otel/issues/9)).
+  Reassembly is verified, but against exactly one frame from one box, so
+  the payload key set and the frame boundary are one observation each.
 
 **Never paste a raw frame into an issue or a pull request.** Read
 [`docs/contributing-samples.md`](docs/contributing-samples.md) first —

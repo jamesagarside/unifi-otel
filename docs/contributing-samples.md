@@ -153,6 +153,7 @@ untouched:
 | `DHCPDISCOVER` putting a MAC where its siblings put an IP | The optional-IP branch of the DHCP pattern. |
 | All four `sudo` shapes, including `pam_unix` auth failures | `user=` instead of `COMMAND=`; a different `event.outcome` path. |
 | A frame with no PRI header | `allow_skip_pri_header: true`. |
+| A `linkcheck` frame's line breaks, in the right places | Each line is a separate datagram. The `recombine` operator keys off the header line's trailing `{` and the closing `}` on its own line; joining, re-indenting or truncating the lines destroys the only property the fixture tests. |
 | Values containing spaces (site names, SSIDs, `Internet 1`, a whole `msg=` sentence) | CEF has no quoting; `transform/cef_extensions` splits on ` key=` and exists precisely for these. |
 
 `scripts/README.md` documents what gets rewritten, what is deliberately
@@ -323,6 +324,15 @@ Nothing about that is visible in an error log or a dataset histogram. It
 took a matched pair to find it, and it will take matched pairs in the
 corpus to stop it coming back.
 
+The same trap was avoided deliberately for `linkcheck` reassembly: the
+`recombine` predicate tests for the `linkcheck[pid]:` tag in *both*
+positions the two hostname shapes put it in — `message` when the
+hostname is doubled, `appname` when it is not — and both were exercised
+before it shipped. That covers the reassembly step only. Whether the
+rest of the device-syslog chain degrades on a single-hostname
+`linkcheck` frame in the way the matrix above shows for its siblings has
+not been tested, because the one real frame available is a doubled one.
+
 **Non-gateway devices, always.** See the wanted list below.
 
 ## What not to bother sending
@@ -376,15 +386,31 @@ Any device whose frames carry a single hostname, whatever it is. See the
 matrix above for why. Matched pairs are ideal; a single-hostname capture
 on its own is still valuable.
 
-### `linkcheck` multi-line JSON — [#9](https://github.com/jamesagarside/unifi-otel/issues/9)
+### A second gateway's `linkcheck` frame — [#9](https://github.com/jamesagarside/unifi-otel/issues/9)
 
-`linkcheck` emits pretty-printed multi-line JSON, which the RFC3164
-parser cannot handle, so those records land in the parse-failure stream —
-roughly five a day in the source environment. A capture of the **complete
-multi-line frame**, with the line breaks intact and in the right places,
-is what is needed to either fix it or document it accurately. This is one
-place where preserving structure means preserving the newlines: do not
-join the lines.
+**This one is mostly satisfied.** A real multi-line `linkcheck` frame was
+contributed, the `recombine` operator that reassembles it shipped on the
+back of it, and the payload is parsed into `unifi.speedtest`. It is on
+this list only because the whole of that rests on **one frame from one
+gateway**: one observation of the payload key set, one of the line count,
+one of the trailing `{` the predicate matches on.
+
+A `linkcheck` frame from a different gateway or a different firmware
+would turn that into a pattern. Worth sending even if it looks
+identical — "identical" is the finding.
+
+The capture rules for this frame are stricter than for a single-line one:
+
+- **Capture off the wire**, with the socket recipe above. Each line is
+  its own datagram, and the datagram boundaries are the thing being
+  tested.
+- **Do not join, re-indent or truncate the lines.** `scripts/scrub.py`
+  is line-oriented and will not disturb your line structure, but it
+  cannot restore it either. Check with `diff -u` that only values
+  changed and the line count did not.
+- **A `linkcheck` payload carries your ISP, the domain of its website
+  and a city.** The scrubber handles all three by JSON key, but read the
+  diff anyway.
 
 ---
 
