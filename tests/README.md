@@ -8,7 +8,8 @@ gateway.
 
 ```
 tests/
-  corpus/     the frames, one per line, grouped by dataset and shape
+  corpus/     the frames, one per line (or one per `#[frame]` block for
+              a multi-line frame), grouped by dataset and shape
   golden/     the expected record for every frame, plus the expected
               collector telemetry
   run.py      the harness
@@ -18,7 +19,12 @@ tests/
 
 ## Read this first: the corpus is hybrid
 
-**362 frames — 295 real, 67 synthetic.**
+**352 frames — 285 real, 67 synthetic.**
+
+A frame is not always a line. 352 frames go out as **362 wire units**
+(datagrams, or newline-delimited records on TCP), because the one
+`linkcheck` frame is eleven datagrams that the receiver recombines into
+a single record. See [Multi-line frames](#multi-line-frames).
 
 Files named `real-*.txt` came off a live UDM gateway and were passed
 through [`scripts/scrub.py`](../scripts/scrub.py). Everything else was
@@ -71,7 +77,7 @@ what they actually did.
 | The five `dnsmasq-dhcp` shapes, incl. `DHCPDISCOVER` putting a MAC where its siblings put an IP, and `Updating leases` not matching | Observed. |
 | The four `sudo` shapes, incl. vendor service accounts and `pam_unix` | Observed. |
 | `unifi-mq-broker` logs its tag as a **full path** | Observed. |
-| `linkcheck` multi-line JSON becomes one record per line, continuations tagged `syslog_header` | **Observed, and the frame is real.** `real-linkcheck.txt` is one complete captured frame: a header line ending `speedtest.ui_speedtest_log_results(): {`, then one pretty-printed JSON line per datagram, then a closing `}`. This is what #9 was blocked on. |
+| `linkcheck` pretty-prints its JSON and sends **one datagram per line**, only the first carrying a syslog header | **Observed, and the frame is real.** `real-linkcheck.txt` is one complete captured frame: a header line ending `speedtest.ui_speedtest_log_results(): {`, then one pretty-printed JSON line per datagram, then a closing `}`. This is what #9 was blocked on. The receiver now recombines them into one record; the corpus still sends eleven datagrams, because that is what the gateway does. |
 | `linkcheck` is the **only** recurring parse failure | Observed. Every parse-failure record in a 14-day window came from `linkcheck`; nothing else appeared. |
 | SIEM Server emits RFC5424 over TCP, and everything seen on it has been CEF | Observed. |
 | **Every value** — hostname, IP, MAC, domain, SSID, username, policy name, site | **Invented.** They are scrubber-shaped pseudonyms, not scrubbed real data. |
@@ -79,7 +85,7 @@ what they actually did.
 | Code 801 with `act=allowed` | **Assumed.** The allowed side of a firewall policy has not been seen under 801. |
 | AP and switch frames (`kernel`, `hostapd`), and a **doubled** hostname on either | **Invented on top of an invention.** No real AP or switch frame has ever reached this project ([#20](https://github.com/jamesagarside/unifi-otel/issues/20)). |
 | Non-CEF RFC5424 frames | **Invented.** Whether UniFi emits non-CEF device syslog over 5424 at all is open ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)). |
-| The `linkcheck` payload: line count, which lines carry a PRI, where the frame ends | **Invented, and knowingly wrong in shape.** Those three unknowns are the entire reason [#9](https://github.com/jamesagarside/unifi-otel/issues/9) is documented rather than fixed. |
+| The `linkcheck` payload: line count, which lines carry a PRI, where the frame ends | **No longer invented.** Those three unknowns were the entire reason [#9](https://github.com/jamesagarside/unifi-otel/issues/9) was documented rather than fixed; `real-linkcheck.txt` answers all three from a capture, and the synthetic `linkcheck-multiline.txt` that guessed at them was removed. **One** real frame answers them, though — whether every `linkcheck` result has this key set is still unknown. |
 | Event code 999 | **Invented**, deliberately, to exercise the taxonomy default. |
 
 ---
@@ -133,9 +139,9 @@ any one failing exits non-zero.
 
 | Check | What it asserts |
 | --- | --- |
-| corpus structure | Frames are unique; matched-pair files hold an even number of frames and each pair really differs only in the way it claims to. |
+| corpus structure | Frames are unique; matched-pair files hold an even number of frames and each pair really differs only in the way it claims to. A malformed `#[frame]` block — unterminated, nested, stray close, empty — exits 2 during loading, before this check runs at all. |
 | privacy gate | `python3 scripts/scrub.py --check tests/corpus/*.txt` exits 0. This is the command issue [#11](https://github.com/jamesagarside/unifi-otel/issues/11) will gate on, run here so a PR fails locally first. |
-| every frame produced exactly one record | No frame silently dropped, no frame fanned out, no record the harness cannot attribute to a frame. |
+| every frame produced exactly one record | No frame silently dropped, no frame fanned out, no record the harness cannot attribute to a frame. One record per **frame**, not per datagram: a multi-line frame that came back as one record per line shows up here as one missing frame and N orphan records. |
 | **bar 1** — zero OTTL errors | No `error` or `warn` line from any processor or exporter. Receiver-level errors are counted separately and pinned by `golden/_telemetry.golden` rather than waved through. |
 | **bar 2** — exactly one dataset, none on the fallback | Every record carries exactly one `event.dataset`, and none is left on `unifi.syslog`, which is the transient value the non-CEF branch assigns before refinement. |
 | **bar 3** — no working attributes survive | No attribute key matches `transform/strip_working_fields`' own regex — `cef_`, `dev_`, `dns_kv`, `dhcp_`, `sudo_`, and the syslog parser's raw fields. The regex is lifted verbatim from the config so this asserts what the config claims, not a paraphrase of it. |
@@ -154,6 +160,44 @@ bug is present. Only bar 5 and the goldens catch it.
 
 One frame per line. Blank lines and lines starting with `#` are comments
 and are not replayed.
+
+### Multi-line frames
+
+Syslog has no continuation line, so a daemon that pretty-prints sends
+one **datagram per line**. `linkcheck` is the known case: eleven
+datagrams, only the first carrying a PRI and an RFC3164 header. The
+receiver recombines them into one record, and the corpus has to be able
+to say "these lines are one frame" without the harness guessing.
+
+A line that is exactly `#[frame]` opens a block; a line that is exactly
+`#[/frame]` closes it:
+
+```
+#[frame]
+<14>Aug 13 05:08:28 host-43e7 host-43e7 linkcheck[1253]: speedtest…(): {
+  "speedMbps": 1000
+}
+#[/frame]
+```
+
+**Inside a block every line is a wire unit, verbatim.** No `#` comment
+stripping, no blank-line skipping, and leading whitespace is preserved
+exactly — the indentation is bytes the gateway sent, not formatting. Put
+your explanatory comments *above* the block, never inside it.
+
+Each line is sent as its own datagram, in order, so the block exercises
+reassembly rather than assuming it. The whole block is **one** frame: it
+must produce **one** record, its identity for correlation and for the
+goldens is its lines joined with newlines, and the transport is decided
+from its first line.
+
+The harness refuses the file outright — before any container starts — on
+an unterminated block, a nested `#[frame]`, a stray `#[/frame]`, or an
+empty block.
+
+> The markers carry **no dotted token** for the same reason comments must
+> not: `scrub.py --check` reads the whole file and cannot tell a dotted
+> word from a domain.
 
 > **Comments must not contain a dotted token.** `scrub.py --check` runs
 > over the whole file, and a schema field name like `event.dataset` is
@@ -218,14 +262,27 @@ value once the real one exists.
 - **Transport is chosen by the frame's own syntax.** A frame matching
   `<PRI>1 ` is RFC5424 and goes to the TCP receiver on 6601; everything
   else goes to the UDP receiver on 5514. There is no per-file transport
-  setting to keep in sync.
+  setting to keep in sync. For a multi-line frame the **first** line
+  decides, since it is the only one with a header.
 
 - **Frames must be unique.** Records are correlated back to frames by
   content, not by order: the export and failure pipelines batch
   independently, so a failure record can be printed before an earlier
   export record. The key is `event.original` where it is set, and `body`
-  otherwise — which is what makes the header-less `linkcheck`
-  continuation lines correlatable at all.
+  otherwise.
+
+  A reassembled multi-line frame does **not** come back byte-identical
+  to the corpus: the receiver strips the leading whitespace off every
+  header-less line before recombine joins them, so the record carries
+  the JSON de-indented while the corpus keeps the gateway's two-space
+  indentation. The harness indexes each frame under both forms, and that
+  de-indented one is the key that actually hits.
+
+  What it deliberately does **not** index is the individual lines of a
+  multi-line frame. If reassembly ever stops working, each line comes
+  back as its own record and every one is reported as an orphan — which
+  is the honest signal. Indexing them would let that regression
+  correlate cleanly and pass.
 
 ---
 
@@ -255,6 +312,12 @@ attr   dns.question.name = Str(…)
 - Values are asserted, not just key presence. A regression that keeps
   `event.category` populated but changes it to the wrong value shows up
   here.
+- **One logical value per physical line.** A reassembled multi-line frame
+  puts real newlines in `in`, in `body` and in `event.original`; the
+  goldens write a newline as `\n` and a literal backslash as `\\` so a
+  value cannot silently spill into extra rows and read as several fields.
+  Nothing else is escaped. A `body` line in a golden is therefore always
+  exactly one `body`, however many datagrams produced it.
 
 ### What is normalised away, and the blind spot that creates
 
@@ -285,11 +348,33 @@ came from a processor; this file pins the receiver-level noise too.
 "First impressions of a parser are made in its failure stream"
 ([#9](https://github.com/jamesagarside/unifi-otel/issues/9)) — so a new
 source of stack traces in the container log is a finding, not background.
-Every entry in this file must be explainable from a fixture. Today:
+Every entry in this file must be explainable from a fixture.
 
-- 8 + 8 from the eight header-less `linkcheck` continuation lines (the
-  syslog parser raises, then the UDP input logs the write failure);
-- 1 + 1 from the truncated CEF envelope in `edge-cases.txt`.
+**Reassembly did not silence the receiver-level noise, and could not
+have.** A receiver's user operators — `recombine` among them — run
+*after* its own syslog parser, so the ten header-less `linkcheck` lines
+are still parsed individually and still raise before anything recombines
+them. What changed is downstream: they no longer reach the failure
+pipeline as ten records. Today the file holds:
+
+- `syslog_parser` and `udp_input`, one pair per header-less `linkcheck`
+  line — the parser raises `expecting a sequence number`, then the UDP
+  input logs the write failure;
+- `regex_parser` and `udp_input`, one pair from the truncated CEF
+  envelope in `edge-cases.txt`;
+- one `recombine` **warn** per header-less line: *entry does not contain
+  the source_identifier, so it may be pooled with other sources*. Only
+  the header line carries attributes, so the continuations have nothing
+  for recombine to key a batch on. Harmless with a single sender;
+  something to revisit if a second device ever emits multi-line frames
+  into the same receiver.
+
+The two counted pairs come out **one short** of the eleven raising lines,
+and that is the collector's own log sampling, not a lost datagram: zap
+caps identical messages at ten per second by default, `10 + 1 = 11` are
+raised inside one tick, and ten survive. Replaying `real-linkcheck.txt`
+on its own gives the full ten. Do not "fix" the count by reconciling it
+with the fixture by hand — regenerate and read what comes out.
 
 ---
 
@@ -305,14 +390,18 @@ Every entry in this file must be explainable from a fixture. Today:
    shapes, doubled first. If you only have one shape, put it in a
    non-pair file rather than half-filling a pair — the harness will
    reject an odd count, and it should.
-4. Add a `#` comment above it saying what the frame is for, with no
-   dotted tokens.
-5. `python3 scripts/scrub.py --check tests/corpus/*.txt` — must exit 0.
-6. `python3 tests/run.py` — it will fail, because there is no golden for
+4. If the frame arrived as **several datagrams**, wrap it in a
+   `#[frame]` … `#[/frame]` block and paste the lines verbatim,
+   indentation and all. Do not collapse it to one line: that would test
+   a shape the gateway never sends.
+5. Add a `#` comment above it saying what the frame is for, with no
+   dotted tokens. Above the block, not inside it.
+6. `python3 scripts/scrub.py --check tests/corpus/*.txt` — must exit 0.
+7. `python3 tests/run.py` — it will fail, because there is no golden for
    your frame yet. **Read the block it prints for your frame.** That is
    the parser's actual behaviour, and it is the whole reason to add the
    frame.
-7. If the behaviour is right, `python3 tests/run.py --update`, then
+8. If the behaviour is right, `python3 tests/run.py --update`, then
    `diff` the golden and commit both. If the behaviour is wrong, commit
    the frame and the golden anyway and **say so in the PR** — a fixture
    that documents a bug is more valuable than one that documents a
@@ -364,7 +453,7 @@ moved.
 
 ## Known limitations
 
-- **The real frames are one site, one week.** 295 of 362 frames came off
+- **The real frames are one site, one week.** 285 of 352 frames came off
   a single household's UDM gateway over seven days — real UniFi output,
   but not a representative sample of UniFi deployments, hardware
   generations or configurations. Frames from other estates remain the
@@ -396,9 +485,24 @@ moved.
   deliberate — a retry loop would hide a receiver that genuinely drops
   frames — but on a loaded machine it can show up as a spurious "frame
   produced no record". Re-run before believing it.
-- **The harness cannot parse an attribute value containing a newline.**
-  It detects the situation and exits 2 with the offending lines rather
-  than producing a wrong golden.
+- **Only one multi-line shape is exercised.** `real-linkcheck.txt` is the
+  single `#[frame]` block in the corpus, and the receiver's recombine
+  operator is scoped to `linkcheck`-shaped entries. Nothing here tests
+  what happens when two multi-line frames interleave on the wire, or when
+  a payload never sends its closing brace — both are plausible on a busy
+  gateway and neither has been captured.
+- **A multi-line frame does not round-trip byte-for-byte.** The receiver
+  strips the leading whitespace off every header-less line, so the
+  reassembled `body` and `event.original` carry the JSON de-indented.
+  The goldens record what actually comes out, not what was sent; the
+  `in` line above them is the sent bytes, so the difference is visible in
+  the block rather than hidden by it.
+- **The harness parses a newline inside a body or attribute value by
+  reading to the next known section key** (`Attributes:`, `Trace ID:`,
+  `Span ID:`, `Flags:`). A value that itself contained one of those at
+  the start of a line would be truncated there. No fixture does, and a
+  syslog frame realistically cannot, but it is an assumption about the
+  debug exporter's output format rather than a guarantee.
 
 ## One thing the corpus turned up
 

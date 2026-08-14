@@ -86,25 +86,59 @@ CEF_PROVIDER = "unifi-network"
 
 
 # ── Corpus ───────────────────────────────────────────────────────────
-class Frame:
-    __slots__ = ("path", "name", "lineno", "index", "text", "transport")
+# A multi-line frame is one logical frame delivered as SEVERAL wire
+# units: linkcheck pretty-prints its JSON and each LINE leaves the
+# gateway as its own datagram. The receiver stitches them back together
+# with a recombine operator, so the corpus has to be able to say "these
+# N lines are one frame" without the harness guessing.
+#
+# The markers deliberately carry no dotted token: scrub.py --check reads
+# the whole file and cannot tell a dotted word from a domain.
+FRAME_OPEN = "#[frame]"
+FRAME_CLOSE = "#[/frame]"
 
-    def __init__(self, path, name, lineno, index, text):
+
+class Frame:
+    """One logical frame, made of one or more wire units.
+
+    `lines` is what goes on the wire, in order, one send per element.
+    `text` is the frame's IDENTITY: the wire units joined with newlines.
+    Records are correlated back to frames by content, and goldens are
+    keyed on it, so it must be unique across the corpus.
+    """
+
+    __slots__ = ("path", "name", "lineno", "lines", "text", "transport")
+
+    def __init__(self, path, name, lineno, lines):
         self.path = path
         self.name = name
         self.lineno = lineno
-        self.index = index
-        self.text = text
+        self.lines = list(lines)
+        self.text = "\n".join(self.lines)
         # Routed by the frame's own syntax: "<PRI>1 " is RFC5424, which
         # only the TCP receiver speaks. Everything else is RFC3164/UDP.
-        self.transport = "tcp" if re.match(r"^<\d+>1 ", text) else "udp"
+        # Only the FIRST wire unit carries a header, so only it can say.
+        self.transport = "tcp" if re.match(r"^<\d+>1 ", self.lines[0]) else "udp"
+
+    @property
+    def multiline(self):
+        return len(self.lines) > 1
 
     def __repr__(self):
         return f"<Frame {self.name}:{self.lineno}>"
 
 
 def load_corpus():
-    """Read tests/corpus/*.txt. '#' lines and blank lines are comments."""
+    """Read tests/corpus/*.txt into frames.
+
+    Outside a block: one non-blank, non-'#' line is one single-line
+    frame. Blank lines and '#' lines are comments.
+
+    Inside a `#[frame]` … `#[/frame]` block: EVERY line is a wire unit
+    verbatim -- no comment stripping, no blank-line skipping, leading
+    whitespace preserved exactly, because the indentation is part of the
+    bytes the gateway actually sent.
+    """
     frames = []
     paths = sorted(
         os.path.join(CORPUS_DIR, f)
@@ -115,15 +149,62 @@ def load_corpus():
         die(f"no corpus files found in {CORPUS_DIR}")
     for path in paths:
         name = os.path.basename(path)
-        index = 0
+        block = None          # accumulated wire units, or None when closed
+        block_open_at = 0     # line number of the opening marker
         with open(path, "r", encoding="utf-8") as fh:
             for lineno, raw in enumerate(fh, 1):
                 line = raw.rstrip("\n").rstrip("\r")
+
+                if block is not None:
+                    if line == FRAME_CLOSE:
+                        if not block:
+                            die(f"{path}:{block_open_at}: empty {FRAME_OPEN} "
+                                f"block -- a block must hold at least one "
+                                f"wire unit")
+                        frames.append(
+                            Frame(path, name, block_open_at + 1, block))
+                        block = None
+                        continue
+                    if line == FRAME_OPEN:
+                        die(f"{path}:{lineno}: nested {FRAME_OPEN} -- the "
+                            f"block opened at line {block_open_at} is still "
+                            f"open. Blocks do not nest.")
+                    block.append(line)
+                    continue
+
+                if line == FRAME_OPEN:
+                    block = []
+                    block_open_at = lineno
+                    continue
+                if line == FRAME_CLOSE:
+                    die(f"{path}:{lineno}: stray {FRAME_CLOSE} with no "
+                        f"matching {FRAME_OPEN}")
                 if not line.strip() or line.startswith("#"):
                     continue
-                frames.append(Frame(path, name, lineno, index, line))
-                index += 1
+                frames.append(Frame(path, name, lineno, [line]))
+
+        if block is not None:
+            die(f"{path}:{block_open_at}: unterminated {FRAME_OPEN} block -- "
+                f"end of file reached with no {FRAME_CLOSE}")
     return frames
+
+
+def expected_records(frames):
+    """How many records the collector should print for these frames.
+
+    One per FRAME, not one per wire unit: a single-line frame is one
+    datagram and one record, and a multi-line frame is several datagrams
+    that the receiver's recombine operator stitches back into one record
+    before any user operator sees it. So this is len(frames) today -- it
+    exists as a function because that identity is a claim about the
+    receiver config, not an arithmetic truism, and this is where it would
+    change if a frame ever fanned out.
+    """
+    return sum(1 for _ in frames)
+
+
+def wire_units(frames):
+    return sum(len(f.lines) for f in frames)
 
 
 DOUBLED_RE = re.compile(
@@ -350,11 +431,16 @@ def container_logs(name):
 
 # ── Replay ───────────────────────────────────────────────────────────
 def replay(frames, ports, verbose=False):
-    """Send every frame. A socket loop, never `nc`.
+    """Send every WIRE UNIT of every frame. A socket loop, never `nc`.
 
     macOS `nc` truncates UDP datagrams at around 1024 bytes, and a
     truncated CEF frame looks exactly like a parse failure -- you would
     spend an afternoon debugging a parser that is fine.
+
+    A multi-line frame is sent one datagram PER LINE, in order, which is
+    how the gateway sends it. Reassembly is the receiver's job, not the
+    harness's -- sending the frame as a single datagram would test a
+    shape that never occurs on the wire.
     """
     udp_port, tcp_port, _ = ports
     udp = [f for f in frames if f.transport == "udp"]
@@ -370,14 +456,15 @@ def replay(frames, ports, verbose=False):
             pass
         try:
             for f in udp:
-                payload = f.text.encode("utf-8")
-                sent = sock.sendto(payload, ("127.0.0.1", udp_port))
-                if sent != len(payload):
-                    die(
-                        f"short UDP send for {f.name}:{f.lineno} "
-                        f"({sent} of {len(payload)} bytes)"
-                    )
-                time.sleep(0.02)
+                for line in f.lines:
+                    payload = line.encode("utf-8")
+                    sent = sock.sendto(payload, ("127.0.0.1", udp_port))
+                    if sent != len(payload):
+                        die(
+                            f"short UDP send for {f.name}:{f.lineno} "
+                            f"({sent} of {len(payload)} bytes)"
+                        )
+                    time.sleep(0.02)
         finally:
             sock.close()
 
@@ -385,8 +472,9 @@ def replay(frames, ports, verbose=False):
         sock = socket.create_connection(("127.0.0.1", tcp_port), timeout=10)
         try:
             for f in tcp:
-                sock.sendall(f.text.encode("utf-8") + b"\n")
-                time.sleep(0.02)
+                for line in f.lines:
+                    sock.sendall(line.encode("utf-8") + b"\n")
+                    time.sleep(0.02)
             # The stanza tcp input splits on newlines; give it a moment
             # before the FIN so the last frame is not racing the close.
             time.sleep(1.0)
@@ -394,7 +482,8 @@ def replay(frames, ports, verbose=False):
             sock.close()
 
     if verbose:
-        print(f"  replayed {len(udp)} UDP frame(s), {len(tcp)} TCP frame(s)")
+        print(f"  replayed {len(udp)} UDP frame(s) ({wire_units(udp)} unit(s)), "
+              f"{len(tcp)} TCP frame(s) ({wire_units(tcp)} unit(s))")
 
 
 # ── Debug-exporter output parsing ────────────────────────────────────
@@ -418,11 +507,23 @@ class Record:
         self.exporter = ""
 
 
+# The keys the debug exporter prints AFTER Body:, in a fixed order. A
+# multi-line body or attribute value ends at the first of these -- which
+# is the only reliable way to know where such a value stops, since its
+# own continuation lines can look like anything the gateway sent.
+VALUE_TERMINATORS = ("Attributes:", "Trace ID:", "Span ID:", "Flags:")
+
+
 def parse_debug_output(text):
     """Return (records, log_lines).
 
     log_lines is [(level, component_id, message)] for every zap entry, so
     bar 1 can be asserted against the collector's own telemetry.
+
+    Bodies and attribute values may span several physical lines: a
+    recombined multi-line frame puts real newlines in body, and
+    event.original carries the same bytes. Such a value is accumulated
+    until one of VALUE_TERMINATORS (or a structural line) is reached.
     """
     records = []
     log_lines = []
@@ -433,6 +534,21 @@ def parse_debug_output(text):
     section = None
     unparsed = []
 
+    # An open multi-line value: (record, "body"|"attr", key, [parts]).
+    pending = None
+
+    def flush():
+        nonlocal pending
+        if pending is None:
+            return
+        target, kind, key, parts = pending
+        pending = None
+        value = "\n".join(parts)
+        if kind == "body":
+            target.body = value
+        else:
+            target.attrs.append((key, value))
+
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -440,6 +556,7 @@ def parse_debug_output(text):
 
         m = ZAP_PREFIX.match(line)
         if m:
+            flush()
             level = m.group(1)
             rest = line[m.end():]
             comp = COMPONENT_ID.search(line)
@@ -459,6 +576,7 @@ def parse_debug_output(text):
             continue
 
         if ZAP_FIELDS.match(line):
+            flush()
             comp = COMPONENT_ID.search(line)
             for r in dump:
                 r.exporter = comp.group(1) if comp else ""
@@ -469,10 +587,12 @@ def parse_debug_output(text):
             continue
 
         if line.startswith("ResourceLog #") or line.startswith("ScopeLogs #"):
+            flush()
             rec = None
             section = None
             continue
         if line.startswith("LogRecord #"):
+            flush()
             rec = Record()
             dump.append(rec)
             section = None
@@ -480,7 +600,37 @@ def parse_debug_output(text):
         if rec is None:
             continue
 
-        if line.startswith("ObservedTimestamp: "):
+        # Terminators come first: they close whatever value is open, and
+        # nothing inside a value may be mistaken for them.
+        if line == "Attributes:":
+            flush()
+            section = "attrs"
+            continue
+        if line.startswith(VALUE_TERMINATORS):
+            flush()
+            section = None
+            continue
+
+        if section == "attrs":
+            m = ATTR_RE.match(line)
+            if m:
+                flush()
+                pending = (rec, "attr", m.group(1), [m.group(2)])
+            elif pending is not None:
+                # continuation of the attribute value opened above
+                pending[3].append(line)
+            else:
+                unparsed.append(line)
+            continue
+
+        if pending is not None:
+            # continuation of a multi-line Body
+            pending[3].append(line)
+            continue
+
+        if line.startswith("Body: "):
+            pending = (rec, "body", None, [line[len("Body: "):]])
+        elif line.startswith("ObservedTimestamp: "):
             rec.observed = line[len("ObservedTimestamp: "):]
         elif line.startswith("Timestamp: "):
             rec.timestamp = line[len("Timestamp: "):]
@@ -490,30 +640,18 @@ def parse_debug_output(text):
             rec.severity_text = ""
         elif line.startswith("SeverityNumber: "):
             rec.severity_number = line[len("SeverityNumber: "):]
-        elif line.startswith("Body: "):
-            rec.body = line[len("Body: "):]
-        elif line == "Attributes:":
-            section = "attrs"
-        elif line.startswith("Trace ID:") or line.startswith("Span ID:") \
-                or line.startswith("Flags:"):
-            section = None
-        elif section == "attrs":
-            m = ATTR_RE.match(line)
-            if m:
-                rec.attrs.append((m.group(1), m.group(2)))
-            else:
-                unparsed.append(line)
         elif line.startswith("Resource ") or line.startswith("InstrumentationScope") \
                 or line.startswith("     -> "):
             continue
 
+    flush()
     if dump:
         records.extend(dump)
     if unparsed:
         die(
-            "could not parse the debug exporter output -- most likely an "
-            "attribute value containing a newline, which this harness does "
-            "not handle:\n  " + "\n  ".join(unparsed[:5])
+            "could not parse the debug exporter output -- an attribute "
+            "block held a line that is neither an attribute nor the "
+            "continuation of one:\n  " + "\n  ".join(unparsed[:5])
         )
     return records, log_lines
 
@@ -570,10 +708,22 @@ def norm_exporter(exporter):
     return exporter or "?"
 
 
+def escape(value):
+    """Keep one logical value on one physical golden line.
+
+    A recombined multi-line frame puts real newlines in body, in
+    event.original and in the frame text itself. Goldens are read line by
+    line and diffed line by line, so an unescaped newline would silently
+    turn one value into several rows. Backslash first, then newline, so
+    the escaping round-trips.
+    """
+    return value.replace("\\", "\\\\").replace("\n", "\\n")
+
+
 def render_block(frame, rec):
     """One frame's normalised record. Stable, diffable, no wall clock."""
     out = ["--- frame"]
-    out.append("in     " + frame.text)
+    out.append("in     " + escape(frame.text))
     out.append("wire   " + frame.transport)
     if rec is None:
         out.append("route  MISSING -- no record was produced for this frame")
@@ -582,10 +732,10 @@ def render_block(frame, rec):
     out.append("sev    " + (rec.severity_number or "-") +
                " / " + (rec.severity_text or "-"))
     out.append("time   " + norm_time(rec))
-    out.append("fail   " + (unwrap(attr(rec, "unifi.parse_failure")) or "-"))
-    out.append("body   " + rec.body)
+    out.append("fail   " + escape(unwrap(attr(rec, "unifi.parse_failure")) or "-"))
+    out.append("body   " + escape(rec.body))
     for k, v in sorted(rec.attrs):
-        out.append(f"attr   {k} = {v}")
+        out.append(f"attr   {k} = {escape(v)}")
     return "\n".join(out) + "\n"
 
 
@@ -594,7 +744,9 @@ def render_golden(name, frames, mapping):
         "# GENERATED by tests/run.py -- do not hand-edit.",
         f"# corpus: {name}",
         "# Timestamps are normalised (see norm_time in tests/run.py);",
-        "# attributes are sorted by key. Regenerate with:",
+        "# attributes are sorted by key. One logical value per line: a",
+        "# newline inside a value is written \\n and a backslash \\\\, so a",
+        "# reassembled multi-line frame stays on one row. Regenerate with:",
         "#     python3 tests/run.py --update",
         "",
     ]
@@ -639,6 +791,26 @@ def render_telemetry_golden(telemetry):
 
 
 # ── Correlation ──────────────────────────────────────────────────────
+def frame_keys(frame):
+    """Every content key a record for this frame might correlate under.
+
+    A recombined multi-line frame does NOT come back byte-identical to
+    the corpus text: the syslog receiver strips the leading whitespace
+    off every header-less continuation line before recombine joins them,
+    so the record's body carries the JSON DE-INDENTED while the corpus
+    preserves the two-space indentation the gateway actually sent. That
+    de-indented form is the key that will hit in practice; the others
+    are kept so a change on either side still correlates.
+    """
+    dedented = "\n".join(line.lstrip() for line in frame.lines)
+    keys = [frame.text, frame.text.strip(), dedented, dedented.strip()]
+    out = []
+    for k in keys:
+        if k not in out:
+            out.append(k)
+    return out
+
+
 def correlate(frames, records):
     """Map records back to the frame that produced them, by content.
 
@@ -647,12 +819,17 @@ def correlate(frames, records):
     before an earlier export record. Content works because
     transform/device_syslog and transform/unifi_ecs both put the raw
     frame in event.original -- and where they do not (a header-less
-    continuation line), the raw line survives in body with its leading
-    whitespace stripped by the receiver.
+    line), the raw text survives in body.
+
+    Note what is deliberately NOT indexed: the individual wire units of a
+    multi-line frame. If the receiver stops recombining them, each line
+    comes back as its own record and every one of them is reported as an
+    orphan, which is the honest signal. Indexing them would let a
+    regression that undoes reassembly correlate cleanly.
     """
     index = {}
     for f in frames:
-        for key in (f.text, f.text.strip()):
+        for key in frame_keys(f):
             index.setdefault(key, f)
 
     mapping = {}
@@ -733,7 +910,10 @@ def main():
     print(f"unifi-otel corpus replay")
     print(f"  image      {image}")
     print(f"  timezone   {CORPUS_TIMEZONE}")
-    print(f"  corpus     {len(frames)} frame(s) in {len(by_file)} file(s)")
+    multiline = [f for f in frames if f.multiline]
+    print(f"  corpus     {len(frames)} frame(s) in {len(by_file)} file(s), "
+          f"{wire_units(frames)} wire unit(s)"
+          + (f", {len(multiline)} multi-line frame(s)" if multiline else ""))
     print()
 
     report = Report()
@@ -778,9 +958,12 @@ def main():
             start_collector(CONTAINER_A, image, PORTS_A, None, args.verbose))
         wait_ready(CONTAINER_A, PORTS_A[2])
         replay(frames, PORTS_A, args.verbose)
-        log_a = drain(CONTAINER_A, len(frames), args.timeout, args.verbose)
+        log_a = drain(CONTAINER_A, expected_records(frames),
+                      args.timeout, args.verbose)
         records_a, telemetry_a = parse_debug_output(log_a)
-        print(f"  {len(records_a)} record(s) from {len(frames)} frame(s)")
+        print(f"  {len(records_a)} record(s) from {len(frames)} frame(s) "
+              f"({wire_units(frames)} wire unit(s)), "
+              f"{expected_records(frames)} expected")
 
         mapping_a, dups, orphans = correlate(frames, records_a)
 
@@ -793,9 +976,10 @@ def main():
                       f"{len(dups)} duplicate(s), {len(orphans)} orphan record(s)")
         report.add("every frame produced exactly one record", ok, detail)
         for f in missing[:10]:
-            print(f"         no record for {f.name}:{f.lineno}: {f.text[:90]}")
+            print(f"         no record for {f.name}:{f.lineno}: "
+                  f"{escape(f.text)[:90]}")
         for r in orphans[:10]:
-            print(f"         orphan record body={r.body[:90]}")
+            print(f"         orphan record body={escape(r.body)[:90]}")
 
         # ---- bar 1: zero OTTL errors --------------------------------
         bad = [(lvl, comp, msg) for lvl, comp, msg in telemetry_a
@@ -918,7 +1102,8 @@ def main():
                                 processors_no_dev, args.verbose))
             wait_ready(CONTAINER_B, PORTS_B[2])
             replay(cef_frames, PORTS_B, args.verbose)
-            log_b = drain(CONTAINER_B, len(cef_frames), args.timeout, args.verbose)
+            log_b = drain(CONTAINER_B, expected_records(cef_frames),
+                          args.timeout, args.verbose)
             records_b, telemetry_b = parse_debug_output(log_b)
             mapping_b, _, _ = correlate(cef_frames, records_b)
             print(f"  {len(records_b)} record(s) from {len(cef_frames)} frame(s)")

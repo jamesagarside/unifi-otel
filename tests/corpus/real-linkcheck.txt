@@ -3,12 +3,17 @@
 #
 # linkcheck pretty-prints its speedtest result and each line arrives
 # as its own datagram. The first line carries a full syslog header;
-# every line after it has none, so the parser tags them syslog_header
-# and routes them to the failure pipeline. See docs/known-issues
+# every line after it has none. The receiver recombines them, so the
+# eleven datagrams below become ONE record. See docs/known-issues
 #
 # Only one frame is kept on purpose: real captures repeat lines like
 # the closing brace across results, and the harness correlates
 # records to frames by content, so repeats cannot be paired
+#
+# Everything between the markers is a wire unit, verbatim and in order.
+# The leading spaces are bytes the gateway sent, not formatting: do not
+# reindent them, and do not add comments or blank lines inside the block
+#[frame]
 <14>Aug 13 05:08:28 host-43e7 host-43e7 linkcheck[1253]: speedtest.ui_speedtest_log_results(): {
   "url": "http://203.0.113.201:80",
   "latitude": 0.0,
@@ -20,3 +25,4 @@
   "countryCode": "ZZ",
   "speedMbps": 1000
 }
+#[/frame]
