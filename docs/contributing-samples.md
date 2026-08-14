@@ -368,6 +368,190 @@ this project**. It converts an unverified claim into a verified one, and
 in combination with #24 it is likely to expose real bugs rather than
 confirm correctness.
 
+### Any RFC5424 frame at all — [#25](https://github.com/jamesagarside/unifi-otel/issues/25)
+
+**No RFC5424 frame of any kind has ever reached this project.** The
+seven-day capture behind `tests/corpus/real-*.txt` contains zero of them,
+because the gateway it came from has its SIEM Server set to UDP. So
+`syslog/unifi_tcp` — the whole RFC5424 receiver — is exercised by
+invented frames only.
+
+Two separate questions are open, and they are worth different amounts:
+
+1. **What does a real CEF frame look like over RFC5424?** Specifically
+   its `APP-NAME`. The synthetic fixture sets it to the literal `CEF`,
+   because that is what the RFC3164 parser derives from a CEF frame's
+   `CEF:` tag, and that choice is what makes the matched pair agree.
+   Measured against 0.157.0, the whole CEF path over 5424 turns on that
+   one field:
+
+   | `APP-NAME` | Result |
+   | --- | --- |
+   | `CEF` | no `process.name`, no `process.pid` — matches the UDP twin |
+   | `-` (NILVALUE) | no `process.name`, no `process.pid` — matches the UDP twin |
+   | a real process name | `process.name` **and** `process.pid` are set, which the UDP twin never has |
+
+   That third row is not a bug — a real app name is real information —
+   but it means the fixture is green because of a value somebody chose.
+   **This one is answerable and worth answering.**
+
+2. **Does UniFi emit *non-CEF* device syslog over 5424 at all?** Probably
+   not, and the reason is structural rather than mysterious: the two
+   feeds are configured separately, and only one of them offers a
+   transport choice. Per [`quickstart.md`](quickstart.md), device syslog
+   comes from *Remote syslog*, which is RFC3164/UDP with no TCP option,
+   while the RFC5424/TCP option belongs to *SIEM Server*, which carries
+   only CEF. If that holds when somebody actually looks at the UI, the
+   answer to #25 is "there is nothing to capture", the receiver keeps its
+   synthetic regression fixtures, and the ticket closes as documentation.
+   **Confirming that from the UI is itself the contribution.**
+
+#### The capture recipe
+
+You need a UniFi console with the SIEM Server feed enabled. Roughly a
+day of wall-clock time, almost all of it waiting.
+
+**1. Flip the SIEM Server to TCP.**
+
+*Settings → CyberSecure → SIEM Server* (UniFi moves these between
+releases; if it is not there, type "SIEM" into the Settings search box).
+Change the transport from UDP to TCP and point it at port **601** on the
+host running this collector — the container listens on 6601 and the
+Compose/Helm mapping publishes 601 onto it, so the port you type into
+UniFi is 601. Leave *Remote syslog* exactly as it is.
+
+**While you are in there, record what the UI offers.** Screenshot or
+describe, in words, whether *Remote syslog* has any transport or format
+selector at all. That is the answer to question 2 and it costs nothing.
+
+**2. Leave it for 24 hours.**
+
+Not an hour. The low-volume datasets are the interesting ones —
+`unifi.audit` fires when an admin signs in, `unifi.security` when
+something is detected — and a short window catches only firewall and
+client chatter. A day also spans at least one of whatever runs on a
+timer.
+
+Check partway through that anything is arriving at all. If the TCP
+listener is getting nothing, that is a finding too: say so and stop,
+rather than waiting out the day.
+
+**3. Pull the raw frames back out.**
+
+Every parsed record carries the frame it came from in
+`event.original`, so a backend query is the easiest capture route. What
+follows is Elasticsearch, because that is the destination this project's
+maintainer runs; adapt the index names to whatever your gateway routes
+to.
+
+On Elastic Cloud the Elasticsearch endpoint is your Kibana URL with
+`.kb.` replaced by `.es.` — same deployment, different service:
+
+```bash
+export ES_URL="https://<deployment>.es.<region>.<provider>.elastic-cloud.com"
+export ES_KEY="<an API key with read on the unifi indices>"
+```
+
+Successfully parsed records. Pull the window wholesale and pick the
+RFC5424 frames out **client-side** — they are the ones whose
+`event.original` starts `<PRI>1 `. Doing the filter in Python rather than
+in the query is deliberate: whether a `prefix` query on
+`event.original` works depends on how your mapping analysed the field,
+and a query that silently matches nothing looks exactly like a gateway
+that sent nothing.
+
+```bash
+curl -sS -H "Authorization: ApiKey $ES_KEY" -H 'Content-Type: application/json' \
+  "$ES_URL/logs.otel.unifi*/_search?size=1000" -d '{
+  "_source": ["attributes.event.original", "body.text"],
+  "query": {"range": {"@timestamp": {"gte": "now-24h"}}}
+}' | python3 -c '
+import json, re, sys
+
+def original(src):
+    """event.original, however this mapping happens to spell it."""
+    flat = src.get("attributes.event.original")
+    if flat:
+        return flat
+    attrs = src.get("attributes") or {}
+    ev = attrs.get("event")
+    if isinstance(ev, dict):
+        return ev.get("original")
+    return attrs.get("event.original")
+
+doc = json.load(sys.stdin)
+hits = doc.get("hits", {}).get("hits", [])
+print(f"{len(hits)} record(s) in the window", file=sys.stderr)
+seen = set()
+for h in hits:
+    v = original(h["_source"])
+    if v and re.match(r"^<\d+>1 ", v) and v not in seen:
+        seen.add(v)
+        print(v)
+print(f"{len(seen)} distinct RFC5424 frame(s)", file=sys.stderr)
+' > capture-5424.txt
+```
+
+The two counts on stderr are the point of the exercise. "1000 records in
+the window, 0 distinct RFC5424 frames" is a complete and publishable
+answer to question 1 — it says the SIEM feed moved to TCP and device
+syslog did not follow. Report it as a finding rather than as a failed
+capture.
+
+**Parse failures matter more than successes here**, and they live
+somewhere else — this project routes them to their own stream:
+
+```bash
+curl -sS -H "Authorization: ApiKey $ES_KEY" -H 'Content-Type: application/json' \
+  "$ES_URL/logs-unifi.parsefail*/_search?size=1000" -d '{
+  "_source": ["attributes.event.original", "body.text"],
+  "query": {"range": {"@timestamp": {"gte": "now-24h"}}}
+}' | python3 -c '
+import json,sys
+seen=set()
+for h in json.load(sys.stdin)["hits"]["hits"]:
+    s=h["_source"]
+    a=s.get("attributes",{}).get("event",{})
+    v=a.get("original") if isinstance(a,dict) else None
+    # A continuation line never reached the transform that sets
+    # event.original, so the raw text is still sitting in the body.
+    if not v:
+        b=s.get("body")
+        v=b.get("text") if isinstance(b,dict) else b
+    if v and v not in seen:
+        seen.add(v); print(v)
+' >> capture-5424.txt
+```
+
+That `body.text` fallback is not optional. A multi-line payload arrives
+as several wire units and only the first carries a header; the rest have
+no `event.original` at all, and dropping them silently would turn a
+multi-line frame into a one-line one — a fixture for a shape that never
+existed.
+
+**4. Scrub, check, read the diff.**
+
+```bash
+python3 scripts/scrub.py capture-5424.txt -o tests/corpus/transport-rfc5424-real.txt
+python3 scripts/scrub.py --check tests/corpus/transport-rfc5424-real.txt
+diff -u capture-5424.txt tests/corpus/transport-rfc5424-real.txt | less
+```
+
+Then `python3 tests/run.py`, read the block it prints for each new
+frame, and `--update` only once you agree with it. Section 3 above
+covers the rest.
+
+**5. Say what the `APP-NAME` was.**
+
+In the PR, in words. It is the single fact the whole synthetic axis is
+resting on, and it is visible in the fourth field of the frame.
+
+Do **not** delete the synthetic pairs when real frames arrive. They are
+structural fixtures — a NILVALUE `APP-NAME`, a full-path one — and a real
+capture is unlikely to contain either. Add alongside, and update the
+observation-versus-invention table in `tests/README.md`, which is the
+honest claim that directory makes about itself.
+
 ### UniFi Protect and Access alarms — [#21](https://github.com/jamesagarside/unifi-otel/issues/21)
 
 These have **no path into the pipeline at all** today, and cannot have

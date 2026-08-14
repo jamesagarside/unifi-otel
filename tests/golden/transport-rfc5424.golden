@@ -326,3 +326,97 @@ attr   unifi.access_method = Str(Local)
 attr   unifi.category = Str(Audit)
 attr   unifi.site = Str(site-a1b)
 attr   user.name = Str(user-3c8f@example.org)
+
+--- frame
+in     <27>Aug 13 09:22:06 host-0a3 /usr/bin/unifi-mq-broker[1522]: error: failed to connect to broker at 127.0.0.1:1883
+wire   udp
+route  export
+sev    Error(17) / err
+time   parsed 08-13 09:22:06 +0000 UTC
+fail   -
+body   Str(error: failed to connect to broker at 127.0.0.1:1883)
+attr   event.category = Slice(["network"])
+attr   event.dataset = Str(unifi.system)
+attr   event.kind = Str(event)
+attr   event.module = Str(unifi)
+attr   event.original = Str(<27>Aug 13 09:22:06 host-0a3 /usr/bin/unifi-mq-broker[1522]: error: failed to connect to broker at 127.0.0.1:1883)
+attr   event.provider = Str(unifi-syslog)
+attr   event.type = Slice(["info"])
+attr   log.syslog.facility.code = Int(3)
+attr   log.syslog.facility.name = Str(daemon)
+attr   log.syslog.priority = Int(27)
+attr   observer.name = Str(host-0a3)
+attr   observer.vendor = Str(Ubiquiti)
+attr   process.executable = Str(/usr/bin/unifi-mq-broker)
+attr   process.name = Str(unifi-mq-broker)
+attr   process.pid = Int(1522)
+
+--- frame
+in     <27>1 2026-08-13T09:22:06.000000+01:00 host-0a3 /usr/bin/unifi-mq-broker 1522 - - error: failed to connect to broker at 127.0.0.1:1883
+wire   tcp
+route  export
+sev    Error(17) / err
+time   parsed 08-13 08:22:06 +0000 UTC
+fail   -
+body   Str(error: failed to connect to broker at 127.0.0.1:1883)
+attr   event.category = Slice(["network"])
+attr   event.dataset = Str(unifi.system)
+attr   event.kind = Str(event)
+attr   event.module = Str(unifi)
+attr   event.original = Str(<27>1 2026-08-13T09:22:06.000000+01:00 host-0a3 /usr/bin/unifi-mq-broker 1522 - - error: failed to connect to broker at 127.0.0.1:1883)
+attr   event.provider = Str(unifi-syslog)
+attr   event.type = Slice(["info"])
+attr   log.syslog.facility.code = Int(3)
+attr   log.syslog.facility.name = Str(daemon)
+attr   log.syslog.priority = Int(27)
+attr   observer.name = Str(host-0a3)
+attr   observer.vendor = Str(Ubiquiti)
+attr   process.executable = Str(/usr/bin/unifi-mq-broker)
+attr   process.name = Str(unifi-mq-broker)
+attr   process.pid = Int(1522)
+
+--- frame
+in     <27>Aug 13 09:22:07 host-0a3 ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying
+wire   udp
+route  export
+sev    Error(17) / err
+time   parsed 08-13 09:22:07 +0000 UTC
+fail   -
+body   Str(warning: could not open /var/log/ulog/syslogemu, retrying)
+attr   event.category = Slice(["network"])
+attr   event.dataset = Str(unifi.system)
+attr   event.kind = Str(event)
+attr   event.module = Str(unifi)
+attr   event.original = Str(<27>Aug 13 09:22:07 host-0a3 ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying)
+attr   event.provider = Str(unifi-syslog)
+attr   event.type = Slice(["info"])
+attr   log.syslog.facility.code = Int(3)
+attr   log.syslog.facility.name = Str(daemon)
+attr   log.syslog.priority = Int(27)
+attr   observer.name = Str(host-0a3)
+attr   observer.vendor = Str(Ubiquiti)
+attr   process.name = Str(ulogd)
+attr   process.pid = Int(1122)
+
+--- frame
+in     <27>1 2026-08-13T09:22:07.000000+01:00 host-0a3 - - - - ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying
+wire   tcp
+route  export
+sev    Error(17) / err
+time   parsed 08-13 08:22:07 +0000 UTC
+fail   -
+body   Str(warning: could not open /var/log/ulog/syslogemu, retrying)
+attr   event.category = Slice(["network"])
+attr   event.dataset = Str(unifi.system)
+attr   event.kind = Str(event)
+attr   event.module = Str(unifi)
+attr   event.original = Str(<27>1 2026-08-13T09:22:07.000000+01:00 host-0a3 - - - - ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying)
+attr   event.provider = Str(unifi-syslog)
+attr   event.type = Slice(["info"])
+attr   log.syslog.facility.code = Int(3)
+attr   log.syslog.facility.name = Str(daemon)
+attr   log.syslog.priority = Int(27)
+attr   observer.name = Str(host-0a3)
+attr   observer.vendor = Str(Ubiquiti)
+attr   process.name = Str(ulogd)
+attr   process.pid = Int(1122)

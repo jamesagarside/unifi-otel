@@ -270,6 +270,23 @@ def validate_corpus(frames):
                         f"Expected RFC3164/UDP first and RFC5424/TCP second, "
                         f"got {a.transport}/{b.transport}."
                     )
+                elif DOUBLED_RE.match(a.text):
+                    # RFC5424 has no doubled-hostname shape, so there is
+                    # nothing on the TCP side to pair a doubled RFC3164
+                    # frame against. Allowing one would vary the hostname
+                    # axis and the transport axis at the same time, and a
+                    # matched pair that varies two things proves neither
+                    # -- it is also what makes body comparable across a
+                    # transport pair at all, since the two hostname
+                    # shapes are known to disagree on body (see the sudo
+                    # note in tests/README.md).
+                    errors.append(
+                        f"{name}:{a.lineno}: the RFC3164 member of a transport "
+                        f"pair must carry a SINGLE hostname. This one doubles "
+                        f"it, which varies the hostname axis as well as the "
+                        f"transport. Put a doubled frame in a device-*.txt "
+                        f"pair instead."
+                    )
     return errors
 
 
@@ -927,6 +944,29 @@ def main():
         for e in errs:
             print(f"         {e}")
 
+    # ---- precheck: both receivers are actually reached --------------
+    # Bar 4 refuses to pass on zero CEF frames for the same reason: a
+    # check whose scope is derived from the corpus can silently shrink to
+    # nothing and keep reporting PASS. Every real frame this project has
+    # ever seen arrived over UDP/RFC3164, so the RFC5424 frames are the
+    # ones somebody might reasonably delete -- and deleting both members
+    # of a transport pair keeps the pair count even, keeps every bar
+    # green, and leaves syslog/unifi_tcp completely untested with no
+    # visible sign of it. This is that sign.
+    by_transport = {}
+    for f in frames:
+        by_transport[f.transport] = by_transport.get(f.transport, 0) + 1
+    transport_pairs = [p for p in matched_pairs(frames) if p[0] == "transport"]
+    report.add(
+        "both syslog receivers exercised",
+        by_transport.get("udp", 0) > 0
+        and by_transport.get("tcp", 0) > 0
+        and len(transport_pairs) > 0,
+        f"{by_transport.get('udp', 0)} RFC3164/UDP frame(s), "
+        f"{by_transport.get('tcp', 0)} RFC5424/TCP frame(s), "
+        f"{len(transport_pairs)} transport pair(s)",
+    )
+
     # ---- precheck: privacy gate -------------------------------------
     # The same command issue #11 will gate on. Findings are redacted by
     # scrub.py itself, so it is safe to print them in CI.
@@ -1077,6 +1117,88 @@ def main():
             if oa != a.text or ob != b.text:
                 pair_problems.append(
                     (kind, a, b, "event.original missing or not byte-equal to the frame sent"))
+                continue
+
+            # ---- values, not just keys (issue #25) ------------------
+            # Key-set equality passes a regression that keeps every
+            # field populated and fills one of them from the wrong
+            # capture group -- a doubled hostname landing in
+            # process.name, an RFC5424 PROCID read as a port. The two
+            # members carry the same payload by construction, so every
+            # mapped value must be equal, not merely present.
+            #
+            # event.original is excluded because it IS the frame, and
+            # the frames differ by construction. It is asserted
+            # byte-exactly just above instead.
+            #
+            # log.time is deliberately NOT compared. An RFC3164 frame is
+            # stamped in UNIFI_SYSLOG_TIMEZONE while its RFC5424 twin
+            # carries an explicit offset, so the two legitimately differ
+            # by the zone; the goldens pin both.
+            va = {k: v for k, v in ra.attrs if k != "event.original"}
+            vb = {k: v for k, v in rb.attrs if k != "event.original"}
+            value_diffs = sorted(k for k in va if va[k] != vb.get(k))
+            if value_diffs:
+                pair_problems.append((
+                    kind, a, b,
+                    "same key, different value: " + "; ".join(
+                        f"{k} = {va[k]} vs {vb.get(k)}" for k in value_diffs[:3])
+                ))
+                continue
+
+            # ---- the #24 signature, stated directly (issue #25) -----
+            # "body free of the raw frame" is one of issue #25's stated
+            # acceptance criteria, and it is exactly what #24 looked
+            # like: dev_msg was never set, so body kept the whole frame
+            # -- PRI, timestamp, hostname and tag included.
+            #
+            # Today that is also caught by the event.original clause
+            # above, because the same bug leaves event.original unset.
+            # This does not rely on that coupling: a future path could
+            # set event.original and still fail to replace body, and
+            # the criterion is worth asserting in its own right.
+            #
+            # Scoped to pairs that parsed cleanly. A frame that lands in
+            # the failure pipeline legitimately keeps the raw frame in
+            # body, and such a frame is the single most valuable
+            # contribution this project asks for
+            # (docs/contributing-samples.md) -- it must not be rejected
+            # by a bar written for the frames that parse.
+            if fa is None and fb is None:
+                raw = [
+                    who for who, rec, frame in
+                    (("first", ra, a), ("second", rb, b))
+                    if unwrap(rec.body) in frame_keys(frame)
+                ]
+                if raw:
+                    pair_problems.append((
+                        kind, a, b,
+                        f"{'/'.join(raw)} member still carries the whole raw "
+                        f"frame in body -- the issue #24 signature"
+                    ))
+                    continue
+
+            # ---- transport pairs: body too --------------------------
+            # The same payload over two wire formats must yield the same
+            # body, which is the strongest single statement that the
+            # RFC5424 path is not quietly parsing something else.
+            #
+            # NOT asserted for hostname pairs, where two members are
+            # known to disagree legitimately: `sudo` space-pads its
+            # username and only the doubled-hostname frame has that
+            # padding consumed by the device_syslog tag regex, and a
+            # frame with no tag at all keeps the repeated hostname in
+            # body because nothing can tell it from the first word of
+            # the message. Both are documented in tests/README.md and
+            # pinned by the goldens. Neither shape exists on RFC5424,
+            # and validate_corpus refuses a doubled RFC3164 frame in a
+            # transport pair, so this is safe here and only here.
+            if kind == "transport" and ra.body != rb.body:
+                pair_problems.append((
+                    kind, a, b,
+                    f"body differs across the wire formats: "
+                    f"{escape(ra.body)[:70]} vs {escape(rb.body)[:70]}"
+                ))
         report.add(
             f"bar 5: {len(pairs)} matched pair(s) agree",
             not pair_problems,

@@ -12,12 +12,37 @@
 # -- the exact path issue #24 showed was silently degraded. It was never
 # replayed before.
 #
-# HONESTY NOTE: no real non-CEF RFC5424 device frame has ever been seen by
-# this project. UniFi's SIEM Server emits RFC5424 over TCP, but every
-# frame observed on that path has been CEF. Whether UniFi emits non-CEF
-# device syslog over 5424 at all is an OPEN QUESTION (#25). Pairs 1-4
-# below are therefore inventions testing a receiver, not a record of
-# vendor behaviour.
+# The RFC3164 member of every pair carries a SINGLE hostname. RFC5424 has
+# no doubled-hostname shape, so pairing a doubled frame against one would
+# vary two axes at once; the harness refuses it.
+#
+# HONESTY NOTE: NO RFC5424 FRAME OF ANY KIND HAS EVER REACHED THIS
+# PROJECT. The seven-day capture behind the real-*.txt files contains
+# zero of them -- the gateway it came from has its SIEM Server set to
+# UDP. UniFi's SIEM Server offers RFC5424 over TCP as an option, and that
+# is the whole of what is known: not that it has been seen, and not what
+# it looks like. Whether UniFi emits non-CEF device syslog over 5424 at
+# all is an OPEN QUESTION (#25).
+#
+# So every frame below is an invention. What they can honestly prove is a
+# property of THIS CONFIG -- that a well-formed RFC5424 frame carrying a
+# known payload comes out of the pipeline as the same record its RFC3164
+# twin does. What they cannot prove is that UniFi ever sends one, or that
+# it looks like this if it does.
+#
+# THE ONE ASSUMPTION MOST LIKELY TO BE WRONG is the APP-NAME on pair 5.
+# It is set to the literal "CEF" because that is what the RFC3164 parser
+# derives from a CEF frame's "CEF:" tag, and it makes the pair agree.
+# Measured against 0.157.0, the CEF path over RFC5424 turns entirely on
+# that field:
+#     APP-NAME "CEF"      -> no process name, no process pid (matches UDP)
+#     APP-NAME "-"        -> no process name, no process pid (matches UDP)
+#     APP-NAME a real one -> process name AND process pid ARE set, which
+#                            the UDP twin never has, and bar 5 would fail
+# That last row is not a bug -- a real app name is real information --
+# but it means pair 5 is green because of a value somebody chose, not a
+# value anybody measured. A real capture settles it; see the RFC5424
+# section of docs/contributing-samples.md for how to take one.
 #
 # 1. coredns JSON.
 <30>Aug 13 09:22:01 host-0a3 coredns[4155]: {"type":"dnsAdBlock","category":"ADVERTISING","domain":"ads.tracking.example.com","src_ip":"198.51.100.24","src_port":51514,"dst_ip":"127.0.0.1","dst_port":1053,"protocol":"udp","mac":"00:00:5E:00:53:11","unix_milli_timestamp":1786609321123,"timestamp":"2026-08-13T09:22:01.123+01:00"}
@@ -34,9 +59,43 @@
 #    explicitly, and nothing else in the config would remove them.
 <30>Aug 13 09:22:04 host-0a3 systemd[1]: Started ubios-udapi-server.service.
 <30>1 2026-08-13T09:22:04.000000+01:00 host-0a3 systemd 1 ID47 [exampleSDID@32473 iut="3" eventSource="host-0a3"] Started ubios-udapi-server.service.
-# 5. CEF. This is the ONE pair on this axis with a real-world basis: the
-#    SIEM Server does emit CEF over RFC5424/TCP, and the CEF path is
-#    separately asserted byte-identical with and without the device
-#    transform (bar 4).
+# 5. CEF. The nearest thing on this axis to a real-world basis, and it is
+#    not very near. The CEF PAYLOAD is real in shape -- CEF over UDP has
+#    been seen in quantity -- and the SIEM Server offers RFC5424 over TCP
+#    as a setting. What has never been seen is CEF over 5424, so the
+#    ENVELOPE around that payload, APP-NAME included, is guesswork. See
+#    the note at the top of this file for what turns on that one field.
+#    The CEF path is separately asserted byte-identical with and without
+#    the device transform (bar 4).
 <14>Aug 13 09:22:05 host-0a3 CEF:0|Ubiquiti|UniFi Network|9.5.24|544|Network Accessed|1|UNIFIhost=site-a1b UNIFIcategory=Audit UNIFIadmin=user-3c8f@example.org src=203.0.113.61 UNIFIaccessMethod=Local UNIFIutcTime=2026-08-13T08:22:05.000Z msg=user-3c8f@example.org signed in to UniFi Network from 203.0.113.61
 <14>1 2026-08-13T09:22:05.000000+01:00 host-0a3 CEF - - - CEF:0|Ubiquiti|UniFi Network|9.5.24|544|Network Accessed|1|UNIFIhost=site-a1b UNIFIcategory=Audit UNIFIadmin=user-3c8f@example.org src=203.0.113.61 UNIFIaccessMethod=Local UNIFIutcTime=2026-08-13T08:22:05.000Z msg=user-3c8f@example.org signed in to UniFi Network from 203.0.113.61
+# 6. A FULL-PATH APP-NAME. unifi-mq-broker logs its tag as a path, and
+#    section 1c of the device transform splits it into process executable
+#    plus a basename. On RFC3164 that path can arrive two ways -- from the
+#    device_syslog regex on a doubled hostname, or from appname on a
+#    single one -- and both are already covered in device-system. This
+#    adds the third way in: an RFC5424 APP-NAME, which is legal syntax
+#    (APP-NAME is 1-48 printable characters, so a slash is allowed).
+#    Nothing in the corpus reached section 1c over TCP before.
+<27>Aug 13 09:22:06 host-0a3 /usr/bin/unifi-mq-broker[1522]: error: failed to connect to broker at 127.0.0.1:1883
+<27>1 2026-08-13T09:22:06.000000+01:00 host-0a3 /usr/bin/unifi-mq-broker 1522 - - error: failed to connect to broker at 127.0.0.1:1883
+# 7. NILVALUE APP-NAME, WITH THE TAG LEFT INSIDE THE MESSAGE. This is the
+#    ONLY pair on this axis that reaches section 1b of the device
+#    transform -- the tag-recovery regex -- on the TCP side. Every other
+#    RFC5424 frame here has an APP-NAME, so the syslog parser sets process
+#    name and section 1b is skipped entirely.
+#
+#    That matters because 1b is the half of section 1 that issue #24 was
+#    about. The RFC5424 frames above all exercise 1a, which is where the
+#    #24 fix landed; none of them exercised the branch it was split apart
+#    FROM. This one does: appname is unset, so the regex has to find
+#    "ulogd[1122]:" inside the message and recover both fields, and the
+#    lazy prefix has to stop at the real tag rather than walking on to the
+#    colon in "warning:".
+#
+#    A NILVALUE APP-NAME is RFC5424's own spelling for "not supplied", not
+#    a UniFi quirk -- it is what a relay emits when it forwards RFC3164
+#    content over 5424 without re-parsing the tag. Still synthetic: nobody
+#    has seen UniFi do this either.
+<27>Aug 13 09:22:07 host-0a3 ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying
+<27>1 2026-08-13T09:22:07.000000+01:00 host-0a3 - - - - ulogd[1122]: warning: could not open /var/log/ulog/syslogemu, retrying
