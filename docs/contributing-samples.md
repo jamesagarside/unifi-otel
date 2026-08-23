@@ -596,6 +596,34 @@ The capture rules for this frame are stricter than for a single-line one:
   and a city.** The scrubber handles all three by JSON key, but read the
   diff anyway.
 
+### Another `ubios-udapi-server` sub-tag that splits a quoted payload — [#32](https://github.com/jamesagarside/unifi-otel/issues/32)
+
+`wan-failover-monitor-icmp` logs a single-quoted blob whose closing
+quote lands on its own line, and the second datagram arrives as a
+**complete** frame with the header, the `ubios-udapi-server[pid]:` tag
+and the sub-tag all re-emitted in front of a lone `'`. The receiver now
+folds the pair back into one record.
+
+The predicate deliberately matches the **quoting**, not that sub-tag:
+any `ubios-udapi-server` message whose last `'` opens a value and never
+closes it is treated as the head of a split payload. That generalisation
+is currently supported by exactly one observed sub-tag, so what is
+wanted is either half of the question:
+
+- **a sibling sub-tag doing the same thing** — `linkstate`, `process`,
+  another `wan-failover-*`, anything. It would turn the generalisation
+  into an observation.
+- **a `ubios-udapi-server` line that ends on an open quote and is
+  genuinely complete**, with no continuation to come. That is the one
+  shape the predicate gets wrong: it holds the record for about five
+  seconds and then emits it alone. A real example is the only thing that
+  would justify narrowing the predicate back to named sub-tags.
+
+Capture rules are the `linkcheck` ones above, with one addition: **send
+both datagrams**. A capture of the head alone is indistinguishable from
+the bug this fixed, and a capture of the continuation alone is a lone
+quote mark.
+
 ---
 
 ## Licensing and attribution

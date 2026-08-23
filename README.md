@@ -29,7 +29,9 @@ the parsing works there first, even if you are heading for Kubernetes.
 | **UniFi Protect, Access and Talk** | **No path in at all** ([#21](https://github.com/jamesagarside/unifi-otel/issues/21)). The SIEM feed is Network-only — its CEF header is always `Ubiquiti\|UniFi Network`. The only other route is the Alarm Manager webhook, which is deliberately absent: for Network events it duplicated syslog exactly, and syslog is the superset. |
 | **SNMP metrics** | **Opt-in, off by default** ([`docs/snmp.md`](docs/snmp.md)). Three extra `--config` flags and SNMPv3 credentials. It reaches the **console only**, and CI cannot cover it. |
 | **Per-port / per-device counters** from adopted APs and switches | **Not available.** Those devices serve no SNMP agent. A UniFi limitation, not a gap here. |
-| `linkcheck` **multi-line JSON** | **Parsed** ([#9](https://github.com/jamesagarside/unifi-otel/issues/9)). A `recombine` operator reassembles the datagrams of one pretty-printed frame into a single record, and the payload becomes `unifi.speedtest`. Verified against **one real captured frame, from one gateway** — the operator is scoped to that shape and nothing else is reassembled. The residual log noise and the multi-gateway caveat are in [`docs/known-issues.md`](docs/known-issues.md). |
+| `linkcheck` **multi-line JSON** | **Parsed** ([#9](https://github.com/jamesagarside/unifi-otel/issues/9)). A `recombine` operator reassembles the datagrams of one pretty-printed frame into a single record, and the payload becomes `unifi.speedtest`. Verified against **one real captured frame, from one gateway**. The residual log noise and the multi-gateway caveat are in [`docs/known-issues.md`](docs/known-issues.md). |
+| `ubios-udapi-server` **split quoted payloads** | **Parsed** ([#32](https://github.com/jamesagarside/unifi-otel/issues/32)). The WAN failover ICMP monitor logs a single-quoted blob whose closing quote lands on its own line, and the second datagram arrives as a *complete* frame — header, tag and sub-tag re-emitted — carrying nothing but that quote. A second `recombine` operator folds the pair into one record, so a burst of failover complaints no longer doubles into half of it being content-free. Verified against **one real captured frame, from one gateway**. |
+| Any **other** multi-line payload | **Not reassembled.** The two operators are scoped to the two shapes above; everything else is still one record per datagram. |
 | **Backend routing** (index, data stream, sourcetype) | **Not shipped, by design.** Records carry `event.dataset`; a backend that routes on a different field — Elasticsearch routes on `data_stream.dataset` — needs that mapping in your own gateway. See [`docs/destinations.md`](docs/destinations.md). |
 
 ## Datasets
@@ -175,9 +177,12 @@ would make everyone else's install a fork.
 [`docs/known-issues.md`](docs/known-issues.md). An entry earns a place
 there if a working deployment produces visible evidence of it — records
 in the parse-failure stream, errors in the container log, or a field
-conspicuously absent. One entry today: `linkcheck`'s continuation lines
-still make the receiver log an error each, even though the frame they
-belong to is now reassembled and no failure record is produced.
+conspicuously absent. Three entries today, all of them residue from
+fixed bugs rather than broken parsing: `linkcheck`'s continuation lines
+still make the receiver log an error each, reassembly logs a `recombine`
+warning per batched entry, and an unterminated quoted line with no
+continuation to come is held for about five seconds before it is emitted
+on its own.
 
 ## Contributing
 

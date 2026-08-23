@@ -19,12 +19,14 @@ tests/
 
 ## Read this first: the corpus is hybrid
 
-**356 frames — 285 real, 71 synthetic.**
+**358 frames — 286 real, 72 synthetic.**
 
-A frame is not always a line. 356 frames go out as **366 wire units**
-(datagrams, or newline-delimited records on TCP), because the one
-`linkcheck` frame is eleven datagrams that the receiver recombines into
-a single record. See [Multi-line frames](#multi-line-frames).
+A frame is not always a line. 358 frames go out as **370 wire units**
+(datagrams, or newline-delimited records on TCP), because three frames
+are several datagrams that the receiver recombines into a single record
+each: the `linkcheck` frame is eleven, and the two
+`wan-failover-monitor-icmp` frames are two apiece. See
+[Multi-line frames](#multi-line-frames).
 
 Files named `real-*.txt` came off a live UDM gateway and were passed
 through [`scripts/scrub.py`](../scripts/scrub.py). Everything else was
@@ -78,6 +80,9 @@ what they actually did.
 | The four `sudo` shapes, incl. vendor service accounts and `pam_unix` | Observed. |
 | `unifi-mq-broker` logs its tag as a **full path** | Observed. |
 | `linkcheck` pretty-prints its JSON and sends **one datagram per line**, only the first carrying a syslog header | **Observed, and the frame is real.** `real-linkcheck.txt` is one complete captured frame: a header line ending `speedtest.ui_speedtest_log_results(): {`, then one pretty-printed JSON line per datagram, then a closing `}`. This is what #9 was blocked on. The receiver now recombines them into one record; the corpus still sends eleven datagrams, because that is what the gateway does. |
+| `ubios-udapi-server` splits an unterminated single-quoted payload across two datagrams, and the second carries a **complete** header — PRI, timestamp, doubled hostname, tag and sub-tag — in front of a lone `'` | **Observed, and the frame is real.** `real-wan-failover.txt` is one complete captured frame from `wan-failover-monitor-icmp`. It is the counter-example to the assumption `linkcheck` taught: a continuation line does **not** always arrive header-less. This is [#32](https://github.com/jamesagarside/unifi-otel/issues/32). |
+| The same producer on a gateway that does **not** double its hostname | **Invented.** `wan-failover-single-host.txt` is the real frame with the doubling removed from both datagrams, and it exists because the recombine predicate has to find the tag by regex on one shape and by `appname` on the other — the [#24](https://github.com/jamesagarside/unifi-otel/issues/24) axis. No real single-hostname frame of any kind has ever reached this project. |
+| Other `ubios-udapi-server` sub-tags emitting the same quoting | **Not observed either way.** The receiver's predicate is deliberately written against the *quoting*, not against `wan-failover-monitor-icmp`, so a sibling sub-tag that does this is covered without a config change — but no capture proves any sibling does. |
 | `linkcheck` is the **only** recurring parse failure | Observed. Every parse-failure record in a 14-day window came from `linkcheck`; nothing else appeared. |
 | SIEM Server *offers* RFC5424 over TCP | **Vendor option, not an observation.** It is a setting in the UniFi UI. **No RFC5424 frame of any kind has ever reached this project** — the seven-day capture contains zero, because the source gateway's SIEM Server is set to UDP. An earlier version of this table said "everything seen on it has been CEF", which was true only in the sense that nothing had been seen on it at all. |
 | A CEF frame over RFC5424 carries `APP-NAME` = `CEF` | **Invented**, and it is the single assumption the transport axis leans on hardest. Measured against 0.157.0: with `APP-NAME` set to `CEF` or to NILVALUE the record matches its UDP twin, but with a real app name the RFC5424 record gains `process.name` and `process.pid` that the UDP twin never has — and the matched pair would fail, correctly. Green here means somebody chose that field's value, not that anybody measured it ([#25](https://github.com/jamesagarside/unifi-otel/issues/25)). |
@@ -165,11 +170,18 @@ and are not replayed.
 
 ### Multi-line frames
 
-Syslog has no continuation line, so a daemon that pretty-prints sends
-one **datagram per line**. `linkcheck` is the known case: eleven
-datagrams, only the first carrying a PRI and an RFC3164 header. The
-receiver recombines them into one record, and the corpus has to be able
-to say "these lines are one frame" without the harness guessing.
+Syslog has no continuation line, so a daemon whose message contains one
+sends one **datagram per line**. Two producers here do, and they do it
+differently — which is the point:
+
+- `linkcheck` pretty-prints JSON across eleven datagrams, and only the
+  first carries a PRI and an RFC3164 header.
+- `wan-failover-monitor-icmp` splits a quoted blob across two, and the
+  second is a **complete frame** — header, tag and sub-tag re-emitted in
+  front of a lone `'`. Nothing about it looks like a continuation.
+
+The receiver recombines each into one record, and the corpus has to be
+able to say "these lines are one frame" without the harness guessing.
 
 A line that is exactly `#[frame]` opens a block; a line that is exactly
 `#[/frame]` closes it:
@@ -218,6 +230,7 @@ empty block.
 | `device-sudo.txt` | All four `sudo` shapes, including `pam_unix`. |
 | `device-system.txt` | Full-path tag, tag with no `[pid]`, no tag at all, `systemd`, a colon inside the message, switch-shaped `kernel`, AP-shaped `hostapd`, and a frame with no PRI header. |
 | `edge-cases.txt` | Truncated CEF envelope, an unmapped event code, an oversized frame. |
+| `wan-failover-single-host.txt` | The [#32](https://github.com/jamesagarside/unifi-otel/issues/32) frame with its hostname doubling removed from both datagrams — the [#24](https://github.com/jamesagarside/unifi-otel/issues/24) axis for a re-headered reassembly. It cannot live in a `device-*.txt` pair: the harness collapses the doubled hostname on the **first line only**, and here every line has one. |
 | `transport-rfc5424.txt` | The [#25](https://github.com/jamesagarside/unifi-otel/issues/25) axis: the same payload over RFC3164/UDP and RFC5424/TCP. Seven pairs — `coredns`, `dnsmasq-dhcp`, `sudo`, `systemd` with RFC5424 `STRUCTURED-DATA` and a `MSGID`, CEF, a full-path `APP-NAME`, and a NILVALUE `APP-NAME` with the tag left inside the message. Wholly invented; see the honesty note at the top of the file. |
 
 **Real frames**, captured from a live gateway and scrubbed. One file per
@@ -235,6 +248,7 @@ dataset, named for it:
 | `real-network.txt` | 8 |
 | `real-security.txt` | 6 |
 | `real-linkcheck.txt` | One complete multi-line frame — the real shape behind [#9](https://github.com/jamesagarside/unifi-otel/issues/9). |
+| `real-wan-failover.txt` | One complete multi-line frame — the real shape behind [#32](https://github.com/jamesagarside/unifi-otel/issues/32), whose continuation carries a full header. |
 
 The counts are uneven because they are real: `unifi.security` and
 `unifi.network` are genuinely low-volume on the capture site, and padding
@@ -247,6 +261,20 @@ brace — and the harness correlates records to frames by content, so
 repeated lines cannot be paired. It supersedes the synthetic
 `linkcheck-multiline.txt`, which was removed: an invented shape has no
 value once the real one exists.
+
+`real-wan-failover.txt` holds one frame for the same reason, and rather
+more sharply: **every** frame this producer emits ends in the identical
+`… wan-failover-monitor-icmp: '` datagram, so two of them in the corpus
+would be two frames sharing a wire unit. Its single-hostname twin lives
+in `wan-failover-single-host.txt`, where the hostname makes the lines
+distinct.
+
+A multi-line frame whose continuation carries its own header does
+round-trip byte-for-byte, unlike the `linkcheck` one: there is no
+leading whitespace for the input operator to strip, so the record's
+`event.original` equals the corpus text exactly. The framing the daemon
+re-emitted is removed from `message` and `body` and **not** from
+`event.original` — see section 0 of `transform/device_syslog`.
 
 ### Conventions the harness enforces
 
@@ -370,19 +398,34 @@ pipeline as ten records. Today the file holds:
   input logs the write failure;
 - `regex_parser` and `udp_input`, one pair from the truncated CEF
   envelope in `edge-cases.txt`;
-- one `recombine` **warn** per header-less line: *entry does not contain
-  the source_identifier, so it may be pooled with other sources*. Only
-  the header line carries attributes, so the continuations have nothing
-  for recombine to key a batch on. Harmless with a single sender;
+- one `recombine` **warn** per BATCHED entry: *entry does not contain
+  the source_identifier, so it may be pooled with other sources*. Read
+  the operator source rather than the count here — the warn is raised
+  once for every entry the `if` accepts, header or not, because the
+  default identifier is a file attribute no UDP path ever sets. An
+  earlier version of this file said "per header-less line", which fits
+  the count but not the code; measured against 0.157.0, the
+  `wan-failover-monitor-icmp` frames raise one each too, and every entry
+  in them carries a full syslog parse. Harmless with a single sender;
   something to revisit if a second device ever emits multi-line frames
   into the same receiver.
 
-The two counted pairs come out **one short** of the eleven raising lines,
-and that is the collector's own log sampling, not a lost datagram: zap
-caps identical messages at ten per second by default, `10 + 1 = 11` are
-raised inside one tick, and ten survive. Replaying `real-linkcheck.txt`
-on its own gives the full ten. Do not "fix" the count by reconciling it
-with the fixture by hand — regenerate and read what comes out.
+Two counts here are **lower** than the number of raising entries, and
+both are the collector's own log sampling rather than a lost datagram.
+The sampler caps identical messages at ten per tick and then keeps only
+every hundredth, and the tick is longer than the whole replay.
+
+- the `syslog_parser` / `udp_input` pairs come out one short of the
+  eleven raising `linkcheck` lines: `10 + 1 = 11` are raised, ten
+  survive;
+- the `recombine` warns stay at ten however many multi-line frames the
+  corpus holds. The `linkcheck` frame raises eleven and exhausts the
+  budget, so the four raised by the two `wan-failover` frames are
+  dropped. Verified by sending one of those frames into an otherwise
+  idle collector: two warns, one per entry.
+
+Do not "fix" either count by reconciling it with the fixtures by hand —
+regenerate and read what comes out.
 
 ---
 
@@ -461,7 +504,7 @@ moved.
 
 ## Known limitations
 
-- **The real frames are one site, one week.** 285 of 356 frames came off
+- **The real frames are one site, one week.** 286 of 358 frames came off
   a single household's UDM gateway over seven days — real UniFi output,
   but not a representative sample of UniFi deployments, hardware
   generations or configurations. Frames from other estates remain the
@@ -512,13 +555,27 @@ moved.
   deliberate — a retry loop would hide a receiver that genuinely drops
   frames — but on a loaded machine it can show up as a spurious "frame
   produced no record". Re-run before believing it.
-- **Only one multi-line shape is exercised.** `real-linkcheck.txt` is the
-  single `#[frame]` block in the corpus, and the receiver's recombine
-  operator is scoped to `linkcheck`-shaped entries. Nothing here tests
-  what happens when two multi-line frames interleave on the wire, or when
-  a payload never sends its closing brace — both are plausible on a busy
-  gateway and neither has been captured.
-- **A multi-line frame does not round-trip byte-for-byte.** The receiver
+- **Two multi-line shapes are exercised, and only two.** The corpus has
+  three `#[frame]` blocks covering the header-less `linkcheck` shape and
+  the re-headered `ubios-udapi-server` one, and both recombine operators
+  are scoped to those. Nothing here tests what happens when two
+  multi-line frames **interleave** on the wire, or when a payload never
+  sends its terminator — both are plausible on a busy gateway and
+  neither has been captured. The interleaving gap is sharper for #32
+  than for #9: the `wan-failover` continuation is a fully-formed frame,
+  so it carries a hostname and could in principle be demultiplexed on
+  one, but `recombine` has no way to express "close the batch this
+  hostname opened" and nothing here would notice if two gateways
+  crossed.
+- **Nothing asserts the 5s flush path.** A `ubios-udapi-server` line
+  that ends `key: 'value` with no continuation to come opens a batch and
+  waits out `force_flush_period` before being emitted alone. Measured by
+  hand against 0.157.0: the record turned up 5.75s after the datagram,
+  and it is complete and correctly parsed. No fixture exercises it,
+  because a frame that only differs after a six-second wait would add
+  six seconds to every run for one assertion.
+- **A header-less multi-line frame does not round-trip byte-for-byte.**
+  The receiver
   strips the leading whitespace off every header-less line, so the
   reassembled `body` and `event.original` carry the JSON de-indented.
   The goldens record what actually comes out, not what was sent; the

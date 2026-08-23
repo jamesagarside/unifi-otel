@@ -15,14 +15,19 @@ implements them.
 | Issue | Symptom | Status |
 | --- | --- | --- |
 | [`linkcheck` continuation lines still log a receiver error each](#linkcheck-continuation-lines-still-log-a-receiver-error-each--9) | `error`-level lines with a Go stack trace in the collector's own log, a handful a day. No parse-failure record any more | Understood, and not addressable from inside this configuration |
+| [Reassembly logs a `recombine` warn per batched entry](#reassembly-logs-a-recombine-warn-per-batched-entry--9-32) | `warn`-level lines reading *entry does not contain the source_identifier* | Understood; harmless on a single-gateway site, and there is nothing to point the identifier at |
+| [An unterminated quoted line with no continuation waits ~5s](#an-unterminated-quoted-line-with-no-continuation-waits-5s--32) | One `ubios-udapi-server` record arrives about five seconds late. Nothing is lost | Accepted cost of the #32 reassembly |
 
-One entry, and it is the residue of a fixed one. The `linkcheck`
-multi-line JSON failure that used to live here **is fixed** — the frame
-is reassembled and parsed into `unifi.speedtest`. What survives is
-collector telemetry that this configuration has no way to reach. The
-history is kept below because the log lines have not changed, so
-somebody who greps for them still needs to land somewhere that explains
-them.
+Three entries, and all three are the residue of fixed ones. Two
+multi-line parse failures that used to live here **are fixed**:
+`linkcheck`'s pretty-printed JSON is reassembled and parsed into
+`unifi.speedtest` (#9), and `ubios-udapi-server`'s split single-quoted
+payloads are reassembled into one `unifi.system` record instead of one
+real record plus one content-free half-record (#32). What survives is
+collector telemetry, and a bounded delay on a shape nobody has actually
+captured. The history is kept below because the log lines have not
+changed, so somebody who greps for them still needs to land somewhere
+that explains them.
 
 ---
 
@@ -198,3 +203,70 @@ collector-side setting that reaches these lines without also silencing
 every other receiver-level error, which is the class of error you most
 want to hear about. Records are unaffected either way — nothing is
 routed anywhere on account of these lines.
+
+---
+
+## Reassembly logs a `recombine` warn per batched entry — [#9](https://github.com/jamesagarside/unifi-otel/issues/9), [#32](https://github.com/jamesagarside/unifi-otel/issues/32)
+
+```
+warn  recombine/transformer.go:204  entry does not contain the
+ source_identifier, so it may be pooled with other sources
+ {... "otelcol.component.id": "syslog/unifi_udp", "operator_id": "recombine"}
+```
+
+One of these for **every entry either recombine operator accepts** —
+not just the continuation lines, and not just the frames that turn out
+to be multi-line. A `linkcheck` frame raises eleven, a
+`wan-failover-monitor-icmp` complaint raises two.
+
+`recombine` groups entries by a source identifier so that two senders'
+interleaved lines do not end up in one record. The default identifier is
+the `log.file.name` attribute, which is set by the file receiver and by
+nothing else: no UDP or TCP syslog path has it, and there is no
+substitute to point it at. The header-less `linkcheck` continuations
+carry no attributes at all, and the `wan-failover` ones carry a full
+syslog parse — neither has a file name, so both warn.
+
+**Harmless on a single-gateway site**, which is every deployment this
+has run in: with one sender, pooling is exactly what is wanted. The
+warning is describing the multi-gateway limitation recorded under #9
+above, once per entry, rather than reporting a fault.
+
+Two things to know before you count them:
+
+- the collector samples its own logs. Identical messages are capped at
+  ten per tick and then thinned to every hundredth, so a busy collector
+  shows far fewer of these than it raised. The corpus replay is a worked
+  example: `real-linkcheck.txt` alone exhausts the budget, and the four
+  raised by the two `wan-failover` frames never appear at all.
+- they are `warn`, not `error`, and no record is routed anywhere on
+  account of them.
+
+Filter on the component id and the message text wherever you collect
+collector logs. As with the receiver errors above, there is no setting
+that reaches these without silencing something you want to hear.
+
+## An unterminated quoted line with no continuation waits ~5s — [#32](https://github.com/jamesagarside/unifi-otel/issues/32)
+
+The #32 reassembly recognises its frames by their quoting: a
+`ubios-udapi-server` message whose last `'` opens a value and is never
+closed is treated as the head of a split payload, and the batch stays
+open until a datagram whose payload is a lone `'` arrives.
+
+If a line matches that shape and **no** continuation is coming — a
+sub-tag that legitimately ends a sentence on an open quote, say — the
+batch is closed by `recombine`'s `force_flush_period` instead, and the
+record is emitted alone. Measured against 0.157.0 by sending one such
+frame into an idle collector: the record appeared **5.75s** after the
+datagram, complete and correctly parsed, with nothing else attached to
+it.
+
+So the cost is bounded latency on one record, not a loss and not a
+merge. It is the same trade the #9 operator already makes for a stray
+brace-leading line, and it is the price of a predicate that does not
+hardcode `wan-failover-monitor-icmp` — see the comment on the operator
+for why that generality is worth paying for.
+
+No line of this shape has ever been seen in a capture. If you find one
+in your own traffic, it is worth an issue: a real example is the only
+thing that could justify narrowing the predicate to named sub-tags.
