@@ -1,0 +1,59 @@
+# REAL, scrubbed. Part of one linkcheck speedtest run captured from a
+# live gateway on UniFi Network 10.5.67, and the reason issue #34 exists
+#
+# This is the CURRENT shape, and it differs from real-linkcheck -- the
+# older capture -- in three ways that all matter:
+#
+#   1. every datagram carries a full RFC3164 header, the doubled
+#      hostname and the tag. Nothing here looks like a continuation
+#   2. the head of the JSON block reads `[info ] {`, not
+#      `speedtest.ui_speedtest_log_results(): {`. The receiver keys on
+#      the trailing brace and never on that text, for this reason
+#   3. one run is several records, not one. The gateway emits a
+#      brace-delimited client-info object, then a BARE list of server
+#      entries with no enclosing braces at all, then three single-line
+#      records at two different severities
+#
+# WHAT IS DELIBERATELY MISSING, and why. The bare server-entry list is
+# NOT in this file. It has no terminator, so recombine opens a batch on
+# its first quoted line and only force_flush_period releases it, about
+# five seconds later. Replayed here, that open batch swallowed the next
+# file's frames and cost two records -- measured, not feared. A fixture
+# whose behaviour depends on what is replayed after it would make every
+# other frame in the corpus order-dependent, which is worse than the
+# gap it closes. The shape is written up in the issue instead
+#
+# The throughput figures the whole dataset is supposed to report arrive
+# on ONE single-line record, `Completed: Downlink ... Uplink ...`, at a
+# different severity from the JSON, and nothing parses it yet. It is
+# frame 3 below so that any future change to the reassembly predicate
+# has to prove it still leaves that record alone -- an earlier draft of
+# the #34 fix did not, and swallowed it
+#
+# Everything between the markers is a wire unit, verbatim and in order
+
+# 1. the client-info object. Brace-delimited, so it reassembles
+#    cleanly and on time, from eleven fully-headed datagrams
+#[frame]
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]: [info ] {
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "ip": "198.51.100.10",
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "isp": "isp-872 403",
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "ispImg": "https://c3578f.example.net/asn/00000_101x101.png",
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "org": "isp-872 403",
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "country": "geo-651 6a9082a",
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "countryCode": "ZZ",
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "lat": 0.0,
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "lon": 0.0,
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]:   "timezone": "Etc/UTC"
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]: }
+#[/frame]
+
+# 2. the wifiman result link, at the JSON severity
+<30>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]: [info ] resultUrl: https://example.net/?result=00000000-0000-0000-0000-000000000000
+
+# 3. THE MEASUREMENT. Downlink and uplink on one line, needing no
+#    reassembly at all, and unparsed today. Must stay its own record
+<14>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]: linkcheck.run_speedtest(): Completed: Downlink 43.000 Mbps, Uplink 39.000 Mbps
+
+# 4. the same result link again, at the other severity
+<14>Aug 23 05:08:37 host-0a3 host-0a3 linkcheck[3726008]: speedtest.ui_speedtest_log_results(): resultUrl: https://example.net/?result=00000000-0000-0000-0000-000000000000

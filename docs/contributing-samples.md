@@ -583,15 +583,19 @@ A `linkcheck` frame from a different gateway or a different firmware
 would turn that into a pattern. Worth sending even if it looks
 identical — "identical" is the finding.
 
-**The most wanted version of this frame is a re-headed one.** A gateway
-on UniFi Network 10.5.67 re-emits the full RFC3164 header, hostname and
-tag on *every* datagram of a multi-line message, which broke the
-reassembly silently
-([#34](https://github.com/jamesagarside/unifi-otel/issues/34)).
-`tests/corpus/linkcheck-headed.txt` covers the shape, but it is the old
-real payload with **invented framing** — nobody has contributed a real
-one. The head line is the part most likely to have changed with the
-firmware, and it is the part the fixture is guessing at.
+A re-headed frame **has now been contributed**: `real-linkcheck-headed.txt`
+is a capture from UniFi Network 10.5.67, where the gateway re-emits the
+full RFC3164 header, hostname and tag on *every* datagram
+([#34](https://github.com/jamesagarside/unifi-otel/issues/34)). It
+settled the question the old fixture was guessing at — the head line now
+reads `[info ] {` — and it exposed that the payload is no longer one
+brace-delimited object at all.
+
+What is still wanted here is **a third gateway or firmware**, to say
+whether either shape is general. And specifically: a run in which the
+server-entry list is terminated, or one where the
+`Completed: Downlink … Uplink …` summary is absent or worded
+differently. Both are load-bearing guesses right now.
 
 The capture rules for this frame are stricter than for a single-line one:
 
@@ -602,11 +606,16 @@ The capture rules for this frame are stricter than for a single-line one:
   is line-oriented and will not disturb your line structure, but it
   cannot restore it either. Check with `diff -u` that only values
   changed and the line count did not.
-- **A `linkcheck` payload carries your ISP, the domain of its website,
-  a city and your public WAN address.** The scrubber handles them, but
-  read the diff anyway — [#31](https://github.com/jamesagarside/unifi-otel/pull/31)
-  exists because an ISP field reached a golden once already. Never paste
-  one of these frames into an issue or a PR description.
+- **A `linkcheck` payload is the most sensitive frame in this project.**
+  It carries your ISP, the domain of its website, a city, your public
+  WAN address, and — in the client-info block — `lat`/`lon` **to your
+  own location**, not the test server's. Verified against a real
+  capture: `scrub.py` catches all of them, reporting the coordinates as
+  kind `coordinate` and zeroing them, and it catches `lat`/`lon` as well
+  as `latitude`/`longitude`. Read the diff anyway;
+  [#31](https://github.com/jamesagarside/unifi-otel/pull/31) exists
+  because an ISP field reached a golden once already. Never paste one of
+  these frames into an issue or a PR description.
 
 ### Another `ubios-udapi-server` sub-tag that splits a quoted payload — [#32](https://github.com/jamesagarside/unifi-otel/issues/32)
 

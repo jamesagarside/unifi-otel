@@ -102,13 +102,38 @@ receivers:
       #     below is about, reached from inside the matcher rather than
       #     from an unrelated frame.
       #
-      # So the predicate no longer tries to recognise a linkcheck
-      # payload LINE at all. It recognises the linkcheck TAG, in all
-      # three forms the parser can leave it in, and lets the closing
-      # brace do the delimiting. Every frame this daemon emits is part
-      # of one payload — it has no single-line output — so accepting
-      # all of them is not a widening in practice, and it is immune to
-      # a firmware change in the payload's first line.
+      # So the predicate recognises the linkcheck TAG — in all three
+      # forms the parser can leave it in — AND the payload's own JSON
+      # punctuation, on the RAW BODY, which is the one string that
+      # reads the same in both hostname shapes and both framings:
+      #
+      #   opens a block   the payload ends in `{`. That covers both
+      #                   head lines seen so far, the older
+      #                   `speedtest.ui_speedtest_log_results(): {`
+      #                   and the current `[info ] {`, without keying
+      #                   on either of them.
+      #   in the block    the payload starts `"` or `}` right after
+      #                   `linkcheck[pid]:`, or — UNHEADED — the whole
+      #                   datagram starts with one of `{`, `}`, `"`.
+      #
+      # Do NOT relax this to "any frame tagged linkcheck". That was
+      # tried, and against real traffic it is actively worse than the
+      # bug: linkcheck also emits single-line records that are not
+      # JSON at all —
+      #
+      #   linkcheck.run_speedtest(): Completed: Downlink 43.000 Mbps,
+      #     Uplink 39.000 Mbps
+      #   [info ] resultUrl: https://…
+      #
+      # — and the payload has a brace-delimited block followed by a
+      # BARE, unterminated list of server entries. A tag-only predicate
+      # therefore leaves a batch open on the server list and swallows
+      # the `Completed:` line into it, which is the only line in the
+      # whole run that carries the measured throughput. Measured
+      # against 0.157.0 on a real frame: 2 records, the second holding
+      # the server list and both summary lines glued together and
+      # arriving 5s late. Punctuation-scoped, the summary lines pass
+      # straight through as their own records, as they do today.
       #
       # THE `if` IS LOAD-BEARING. recombine has no pass-through: an
       # entry it accepts is appended to the open batch, whatever it is.
@@ -173,10 +198,12 @@ receivers:
       # sites are unaffected, which is every site this has run on.
       - type: recombine
         if: >-
-          attributes?.appname == "linkcheck"
+          (attributes?.message == nil and body matches "^[\\{\\}\"]")
+          or ((attributes?.appname == "linkcheck"
           or (attributes?.message != nil
-          and attributes.message matches "(^|\\s)linkcheck\\[[0-9]+\\]:")
-          or (attributes?.message == nil and body matches "^[\\{\\}\"]")
+          and attributes.message matches "(^|\\s)linkcheck\\[[0-9]+\\]:"))
+          and (body matches "\\{$"
+          or body matches "linkcheck\\[[0-9]+\\]:\\s+[\\}\"]"))
         combine_field: body
         combine_with: "\n"
         is_last_entry: >-
