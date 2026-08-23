@@ -215,6 +215,7 @@ unverified destination entries are welcome on the same terms.
 | [`docs/destinations.md`](docs/destinations.md) | Six backends, equally weighted, with verification status |
 | [`docs/snmp.md`](docs/snmp.md) | The opt-in SNMP module: what it adds, what it does not, how to enable it |
 | [`docs/helm.md`](docs/helm.md) | Kubernetes deployment via the wrapper chart |
+| [`docs/elastic-detection-rules.md`](docs/elastic-detection-rules.md) | Which Elastic Security prebuilt rules this data actually populates, which do not fire and the field each one is missing |
 | [`docs/known-issues.md`](docs/known-issues.md) | Known issues, with symptoms and what a fix would need |
 | [`docs/contributing-samples.md`](docs/contributing-samples.md) | How to contribute test fixtures without publishing your network |
 | [`docs/versions.md`](docs/versions.md) | Collector version pinning, the minimum supported version, version-sensitive behaviour |
