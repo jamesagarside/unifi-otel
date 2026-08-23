@@ -21,13 +21,24 @@ implements them.
 Three entries, and all three are the residue of fixed ones. Two
 multi-line parse failures that used to live here **are fixed**:
 `linkcheck`'s pretty-printed JSON is reassembled and parsed into
-`unifi.speedtest` (#9), and `ubios-udapi-server`'s split single-quoted
-payloads are reassembled into one `unifi.system` record instead of one
-real record plus one content-free half-record (#32). What survives is
-collector telemetry, and a bounded delay on a shape nobody has actually
-captured. The history is kept below because the log lines have not
-changed, so somebody who greps for them still needs to land somewhere
-that explains them.
+`unifi.speedtest` (#9, and #34 for the shape that broke it again), and
+`ubios-udapi-server`'s split single-quoted payloads are reassembled into
+one `unifi.system` record instead of one real record plus one
+content-free half-record (#32). What survives is collector telemetry,
+and a bounded delay on a shape nobody has actually captured. The history
+is kept below because the log lines have not changed, so somebody who
+greps for them still needs to land somewhere that explains them.
+
+**One thing to check on your own gateway.** Both reassemblies now handle
+two framings — continuation datagrams with no header, and continuation
+datagrams that re-emit the whole header. Which one you get is a property
+of the gateway, not of the daemon, and the second one appeared partway
+through this project's life ([#34](https://github.com/jamesagarside/unifi-otel/issues/34)).
+If you see `unifi.speedtest` records whose body is a JSON *fragment* —
+`"latitude": 0.0,` on its own, say — with no `unifi.speedtest.speed_mbps`
+on them, reassembly is not matching your gateway and a scrubbed capture
+is worth an issue. Note that a `linkcheck` payload carries your public
+WAN address and your ISP; scrub it before it leaves the machine.
 
 ---
 
@@ -80,7 +91,12 @@ Failed to write entry  {... "otelcol.component.id": "syslog/unifi_udp",
  "error": "expecting a sequence number (from 1 to max 255 digits) [col 3]"}
 ```
 
-**This is the one visible symptom that the fix does not remove.** The
+**This is the one visible symptom that the fix does not remove — and
+only on the unheaded framing.** A gateway that re-emits a header on
+every datagram produces no receiver error at all, because every one of
+them parses cleanly; the reassembly is then invisible in the collector
+log, which is why [#34](https://github.com/jamesagarside/unifi-otel/issues/34)
+went unnoticed. The
 receiver's internal chain is `udp_input → syslog_parser → operators`, so
 the RFC3164 parser has already rejected the bare line and logged it
 before the `recombine` operator — or any processor in this config — gets

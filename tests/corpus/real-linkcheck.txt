@@ -2,9 +2,17 @@
 # this is the actual shape, not a reconstruction.
 #
 # linkcheck pretty-prints its speedtest result and each line arrives
-# as its own datagram. The first line carries a full syslog header;
-# every line after it has none. The receiver recombines them, so the
-# eleven datagrams below become ONE record. See docs/known-issues
+# as its own datagram. In THIS frame the first line carries a full
+# syslog header and every line after it has none. The receiver
+# recombines them, so the eleven datagrams below become ONE record.
+# See docs/known-issues
+#
+# That "every line after it has none" is a property of the frame, NOT
+# of the daemon. A gateway can also re-head every datagram, and one
+# observed on UniFi Network 10.5.67 does -- see linkcheck-headed, and
+# the sibling shape from a different daemon in real-wan-failover. The
+# receiver handles both; this frame is the regression case for the
+# unheaded one, and it must not be replaced by the other
 #
 # Only one frame is kept on purpose: real captures repeat lines like
 # the closing brace across results, and the harness correlates

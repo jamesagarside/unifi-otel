@@ -583,6 +583,16 @@ A `linkcheck` frame from a different gateway or a different firmware
 would turn that into a pattern. Worth sending even if it looks
 identical — "identical" is the finding.
 
+**The most wanted version of this frame is a re-headed one.** A gateway
+on UniFi Network 10.5.67 re-emits the full RFC3164 header, hostname and
+tag on *every* datagram of a multi-line message, which broke the
+reassembly silently
+([#34](https://github.com/jamesagarside/unifi-otel/issues/34)).
+`tests/corpus/linkcheck-headed.txt` covers the shape, but it is the old
+real payload with **invented framing** — nobody has contributed a real
+one. The head line is the part most likely to have changed with the
+firmware, and it is the part the fixture is guessing at.
+
 The capture rules for this frame are stricter than for a single-line one:
 
 - **Capture off the wire**, with the socket recipe above. Each line is
@@ -592,9 +602,11 @@ The capture rules for this frame are stricter than for a single-line one:
   is line-oriented and will not disturb your line structure, but it
   cannot restore it either. Check with `diff -u` that only values
   changed and the line count did not.
-- **A `linkcheck` payload carries your ISP, the domain of its website
-  and a city.** The scrubber handles all three by JSON key, but read the
-  diff anyway.
+- **A `linkcheck` payload carries your ISP, the domain of its website,
+  a city and your public WAN address.** The scrubber handles them, but
+  read the diff anyway — [#31](https://github.com/jamesagarside/unifi-otel/pull/31)
+  exists because an ISP field reached a golden once already. Never paste
+  one of these frames into an issue or a PR description.
 
 ### Another `ubios-udapi-server` sub-tag that splits a quoted payload — [#32](https://github.com/jamesagarside/unifi-otel/issues/32)
 
