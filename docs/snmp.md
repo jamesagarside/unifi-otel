@@ -130,7 +130,7 @@ parses):
 docker run --rm \
   -e UNIFI_SNMP_USER=x -e UNIFI_SNMP_PASSWORD=y \
   -v "$PWD/collector":/conf:ro \
-  otel/opentelemetry-collector-contrib:0.157.0 validate \
+  otel/opentelemetry-collector-contrib:0.158.0 validate \
   --config=/conf/10-receivers-logs.yaml \
   --config=/conf/20-processors-logs.yaml \
   --config=/conf/40-exporters.yaml \

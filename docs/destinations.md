@@ -309,7 +309,7 @@ per-record sourcetype comes from `com.splunk.sourcetype`, not `event.dataset`.
 ## Snippet provenance and version drift
 
 Every snippet above was checked with `otelcol validate` against
-`otel/opentelemetry-collector-contrib:0.157.0` and reported no error. That
+`otel/opentelemetry-collector-contrib:0.158.0` and reported no error. That
 proves the keys exist and parse at that version; it does not prove data
 arrives, which is what the verification table is about.
 
@@ -323,7 +323,7 @@ will bite anyone copying older recipes:
 - On the Elasticsearch exporter, `logs_dynamic_index::enabled` is now a
   no-op (documents route dynamically unless `logs_index` is set), and
   `mapping::mode` is deprecated on `main` in favour of the
-  `elastic.mapping.mode` scope attribute — it still works at 0.157.0.
+  `elastic.mapping.mode` scope attribute — it still works at 0.158.0.
 
 If you are pinned to a different collector version, check the exporter's
 README for that tag rather than trusting this page.

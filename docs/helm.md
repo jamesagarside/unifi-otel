@@ -15,7 +15,7 @@ stays reachable from your own values file.
 | | |
 | --- | --- |
 | Upstream chart | `opentelemetry-collector` 0.168.0 |
-| Collector image | `otel/opentelemetry-collector-contrib:0.157.0` (pinned) |
+| Collector image | `otel/opentelemetry-collector-contrib:0.158.0` (pinned) |
 | Mode | `deployment`, 1 replica |
 | Listeners | udp/514 → containerPort 5514 (RFC3164), tcp/601 → containerPort 6601 (RFC5424) |
 | Exporter | `otlp_grpc/gateway` → `OTLP_GATEWAY_ENDPOINT` |
@@ -298,7 +298,7 @@ helm template chart/ \
   | yq 'select(.kind=="ConfigMap") | .data.relay' > /tmp/conf/relay.yaml
 
 docker run --rm -v /tmp/conf:/conf:ro \
-  otel/opentelemetry-collector-contrib:0.157.0 validate --config=/conf/relay.yaml
+  otel/opentelemetry-collector-contrib:0.158.0 validate --config=/conf/relay.yaml
 ```
 
 Exit 0 means every referenced component exists, every pipeline resolves
@@ -312,7 +312,7 @@ helm template chart/ -f chart/values-snmp.yaml \
 docker run --rm \
   -e UNIFI_SNMP_USER=x -e UNIFI_SNMP_PASSWORD=y \
   -v /tmp/conf:/conf:ro \
-  otel/opentelemetry-collector-contrib:0.157.0 validate --config=/conf/relay-snmp.yaml
+  otel/opentelemetry-collector-contrib:0.158.0 validate --config=/conf/relay-snmp.yaml
 ```
 
 To confirm the chart has not drifted from `collector/*.yaml`, diff the

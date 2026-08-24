@@ -7,12 +7,12 @@ description: >-
 type: application
 
 # Chart version. Bumped independently of the collector config.
-version: 0.1.0
+version: 0.1.1
 
 # The collector release this pipeline is verified against. It is also
 # pinned as image.tag in values.yaml so the running binary matches, rather
 # than drifting with the dependency's appVersion on the next bump.
-appVersion: "0.157.0"
+appVersion: "0.158.0"
 
 home: https://github.com/jamesagarside/unifi-otel
 sources:

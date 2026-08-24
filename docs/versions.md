@@ -4,9 +4,9 @@ This project pins one collector release and tests two.
 
 | | |
 | --- | --- |
-| **Pinned** (what you get if you follow the quickstart or install the chart) | `0.157.0` |
+| **Pinned** (what you get if you follow the quickstart or install the chart) | `0.158.0` |
 | **Minimum supported** | `0.157.0` |
-| Upstream `:latest` when this page was last checked (2026-08-13) | `0.158.0` |
+| Upstream `:latest` when this page was last checked (2026-08-24) | `0.159.0` |
 
 The pin is not caution for its own sake. This configuration leans on
 OTTL, on the syslog receiver's timestamp handling and on confmap's
@@ -134,10 +134,11 @@ the control pass by accident.
 - **Any destination beyond OTLP.** The snippets in `destinations.md`
   are verified by whoever contributed them, at whatever version they
   ran.
-- **Parsing output being unchanged.** The golden-file corpus replay
-  that would prove this does not exist yet (#3). Until it does, a green
-  run means "the configuration still builds", not "the configuration
-  still parses your logs the same way".
+- **Parsing output on frames the corpus does not carry.** The
+  golden-file replay landed in #3 and pins 362 frames across 23 files,
+  so a green run does now mean "the configuration still parses *those*
+  frames the same way". It says nothing about a UniFi log shape nobody
+  has contributed a sample of — see `contributing-samples.md`.
 
 ## How the matrix works
 
@@ -238,10 +239,11 @@ and a stale mirror ships a silently older parser — the worst failure
 this project has available to it. The procedure is the `yq`/`diff` one
 documented in `../chart/README.md`, run for both permutations.
 
-**Not here yet.** The golden-file corpus replay (#3) and the corpus
-privacy gate (#11) belong in this file as sibling jobs. There is
-deliberately no placeholder for them: a job named `corpus-replay` that
-runs nothing and reports green is worse than no job at all.
+**Corpus.** The `corpus` job runs the privacy gate
+(`scrub.py --check`) and then the golden-file replay
+(`tests/run.py --image`), both against the cell's collector version.
+A bump that changes parsing output fails here, and the golden diff in
+the pull request *is* the behaviour change. Landed in #3 and #11.
 
 ## Dependabot
 
@@ -250,13 +252,12 @@ runs nothing and reports green is worse than no job at all.
 monthly and grouped into one pull request.
 
 **Auto-PR, never auto-merge.** Nothing in the configuration enables
-auto-merge and nothing should. Green CI on a bump proves the log path
-still builds. It cannot prove SNMP works, it cannot prove any
-destination beyond OTLP works, and until #3 lands it cannot prove
-parsing output is unchanged. Auto-merging on a partial signal is how a
-bad upstream release reaches every user of this project unattended.
-Revisit when the corpus is broad enough that green means something
-closer to "parsing is unchanged".
+auto-merge and nothing should. Green CI on a bump now proves the log
+path still builds *and* that parsing output is byte-identical across
+the corpus. It still cannot prove SNMP works, and it cannot prove any
+destination beyond OTLP works. Those gaps are narrower than they were,
+but a bump still moves the binary every user runs on evidence that
+stops short of their own deployment, so it stays a human decision.
 
 **Dependabot bumps `docker-compose.yml` and nothing else.** It does not
 know about `chart/values.yaml`, `chart/Chart.yaml` or the documentation
@@ -292,9 +293,9 @@ Most of this arrives as a Dependabot pull request; the rest is manual.
    and the provenance note in `docs/destinations.md`.
 6. The table at the top of this page.
 7. Work through the version-sensitive behaviours above. CI covers the
-   validate permutations and the chart; it does not cover the
-   deprecation warnings, the timezone fallback or list-replacement in
-   the debug profile.
+   validate permutations, the chart and the corpus replay; it does not
+   cover the deprecation warnings, the timezone fallback or
+   list-replacement in the debug profile. Those three are manual.
 8. Leave `COLLECTOR_MIN_SUPPORTED` alone unless the configuration now
    genuinely requires the newer release.
 
@@ -303,7 +304,7 @@ Most of this arrives as a Dependabot pull request; the rest is manual.
 ```bash
 # permutation 1 — expect exit 0
 docker run --rm -v "$PWD/collector":/conf:ro \
-  otel/opentelemetry-collector-contrib:0.157.0 validate \
+  otel/opentelemetry-collector-contrib:0.158.0 validate \
   --config=/conf/10-receivers-logs.yaml \
   --config=/conf/20-processors-logs.yaml \
   --config=/conf/40-exporters.yaml \
@@ -312,7 +313,7 @@ docker run --rm -v "$PWD/collector":/conf:ro \
 # permutation 2 — expect exit 0
 docker run --rm -e UNIFI_SNMP_USER=x -e UNIFI_SNMP_PASSWORD=y \
   -v "$PWD/collector":/conf:ro \
-  otel/opentelemetry-collector-contrib:0.157.0 validate \
+  otel/opentelemetry-collector-contrib:0.158.0 validate \
   --config=/conf/10-receivers-logs.yaml \
   --config=/conf/20-processors-logs.yaml \
   --config=/conf/40-exporters.yaml \

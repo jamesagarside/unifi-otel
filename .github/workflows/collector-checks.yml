@@ -291,7 +291,7 @@ jobs:
 
           # --image so the matrix cell tests the version it was asked to.
           # Left to itself the harness reads the pin from docker-compose,
-          # which would silently test 0.157.0 in every cell.
+          # which would silently test the pinned version in every cell.
           echo "::group::corpus replay — ${IMAGE}"
           rc=0
           python3 tests/run.py --image "$IMAGE" || rc=$?

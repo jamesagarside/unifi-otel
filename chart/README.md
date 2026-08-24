@@ -24,7 +24,7 @@ helm install unifi-otel ./chart -n unifi-otel --create-namespace -f my-values.ya
 | | |
 | --- | --- |
 | Upstream chart | `opentelemetry-collector` 0.168.0 |
-| Collector image | `otel/opentelemetry-collector-contrib:0.157.0` (pinned) |
+| Collector image | `otel/opentelemetry-collector-contrib:0.158.0` (pinned) |
 | Mode | `deployment`, 1 replica |
 | Listeners | udp/514 → containerPort 5514 (RFC3164), tcp/601 → containerPort 6601 (RFC5424) |
 | Service | one Service, `ClusterIP` by default, both protocols on it |
