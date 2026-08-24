@@ -199,6 +199,12 @@ service:
 Schema: ECS-aware, but in `otel` mapping mode attributes are stored under
 `attributes.*` and routing keys off `data_stream.dataset`, not `event.dataset`.
 
+If you are running Elastic Security rather than plain Elasticsearch,
+[`elastic-detection-rules.md`](elastic-detection-rules.md) covers which
+prebuilt detection rules this data populates, which ones cannot fire and
+what each is missing, and the index naming that has to be right before
+any of them see the records at all.
+
 ### Generic OTLP backend
 
 *Unverified — no production mileage.*
