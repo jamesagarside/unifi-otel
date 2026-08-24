@@ -10,10 +10,14 @@ receivers:
   # raw text instead of parsing — parsed records with no timestamp were
   # rejected downstream. The timestamp_guard processor backstops that.
   #
-  # Multi-line payloads ARE reassembled, but only the one shape that was
-  # verified against a real frame: `linkcheck` speedtest results. See the
-  # recombine operator below and docs/known-issues.md. Every other
-  # multi-line payload is still one record per datagram.
+  # Multi-line payloads ARE reassembled, but only the two shapes that
+  # were verified against a real frame: `linkcheck` speedtest results,
+  # whose continuation lines carry no header at all, and
+  # ubios-udapi-server's unterminated single-quoted payloads, whose
+  # continuation arrives as a complete frame with the header and the
+  # sub-tag re-emitted. See the two recombine operators below and
+  # docs/known-issues.md. Every other multi-line payload is still one
+  # record per datagram.
   syslog/unifi_udp:
     udp:
       listen_address: 0.0.0.0:5514
@@ -41,27 +45,95 @@ receivers:
     location: ${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}
     allow_skip_pri_header: true
     operators: &unifi_syslog_operators
-      # ── Reassemble linkcheck's multi-line JSON (issue #9) ──────────
-      # `linkcheck`, the gateway's WAN speedtest daemon, pretty-prints
-      # its result as JSON. Syslog has no continuation line, so each
-      # LINE arrives as its own datagram: the first carries a PRI and an
-      # RFC3164 header, every line after it carries nothing. Without
-      # this operator one frame became one record per line, and every
-      # line after the first was tagged syslog_header and diverted to
-      # the failure pipeline.
+      # ── ONE root cause, two operators ──────────────────────────────
+      # A syslog message containing a newline reaches the receiver as
+      # several datagrams, and the gateway sends the pieces in one of
+      # TWO shapes. Both operators below exist because of that, and
+      # both have to cope with both shapes:
+      #
+      #   UNHEADED  only the first datagram carries a PRI and an
+      #             RFC3164 header; the rest are bare text. The
+      #             receiver's own syslog parser rejects them, so they
+      #             arrive here with NO attributes and their raw text
+      #             in body — leading whitespace already stripped by
+      #             the input operator.
+      #   HEADED    every datagram is a complete, well-formed frame:
+      #             PRI, timestamp, hostname (doubled or not) and the
+      #             tag are all re-emitted in front of each line. The
+      #             syslog parser accepts every one of them, so
+      #             `message` is set on all of them and nothing about
+      #             a continuation looks like a continuation.
+      #
+      # Assuming UNHEADED is what issue #32 was: an operator keyed on
+      # `attributes?.message == nil` simply never fires against a
+      # gateway that re-heads. Do not write a new predicate that keys
+      # on the absence of a header. Test for the TAG and for the
+      # payload's own delimiters, which are the same in both shapes.
       #
       # Operators run AFTER the receiver's own syslog parser (the
-      # internal chain is udp_input → syslog_parser → these), so what
-      # arrives here is already parsed: the header line has attributes
-      # and a timestamp, the continuation lines have neither and keep
-      # their raw text in body — with leading whitespace stripped by
-      # the input operator, which is why the reassembled payload is not
-      # byte-identical to what the gateway indented.
+      # internal chain is udp_input → syslog_parser → these).
+      #
+      # ── Reassemble linkcheck's multi-line JSON (issue #9) ──────────
+      # `linkcheck`, the gateway's WAN speedtest daemon, pretty-prints
+      # its result as JSON, one datagram per line. Without this
+      # operator one frame became one record per line.
       #
       # Verified against 0.157.0 with a real captured frame: 11
-      # datagrams in, 1 record out, and the header entry's attributes,
-      # timestamp and severity survive (recombine keeps the first
-      # entry's fields by default).
+      # UNHEADED datagrams in, 1 record out, and the header entry's
+      # attributes, timestamp and severity survive (recombine keeps the
+      # first entry's fields by default).
+      #
+      # THE HEADED SHAPE IS ALSO HANDLED, and the predicate below was
+      # rewritten for it. The original one tested
+      # `attributes.message matches "\\{$"` for the head and
+      # `attributes?.message == nil` for the continuations, which
+      # against a re-heading gateway fails in two directions at once —
+      # measured against 0.157.0 by replaying a re-headed frame through
+      # the shipped config, and filed as issue #34:
+      #   - the continuation clause never fires, so a seven-datagram
+      #     payload came out as six separate records plus a stranded
+      #     head, each one still tagged unifi.speedtest, and the JSON
+      #     never parsed;
+      #   - the head clause fires and nothing ever closes the batch,
+      #     because `body == "}"` cannot match a closing datagram that
+      #     carries a header. Two successive speedtests then produced
+      #     ONE record whose body was the two head lines glued
+      #     together. That is precisely the swallowing the warning
+      #     below is about, reached from inside the matcher rather than
+      #     from an unrelated frame.
+      #
+      # So the predicate recognises the linkcheck TAG — in all three
+      # forms the parser can leave it in — AND the payload's own JSON
+      # punctuation, on the RAW BODY, which is the one string that
+      # reads the same in both hostname shapes and both framings:
+      #
+      #   opens a block   the payload ends in `{`. That covers both
+      #                   head lines seen so far, the older
+      #                   `speedtest.ui_speedtest_log_results(): {`
+      #                   and the current `[info ] {`, without keying
+      #                   on either of them.
+      #   in the block    the payload starts `"` or `}` right after
+      #                   `linkcheck[pid]:`, or — UNHEADED — the whole
+      #                   datagram starts with one of `{`, `}`, `"`.
+      #
+      # Do NOT relax this to "any frame tagged linkcheck". That was
+      # tried, and against real traffic it is actively worse than the
+      # bug: linkcheck also emits single-line records that are not
+      # JSON at all —
+      #
+      #   linkcheck.run_speedtest(): Completed: Downlink 43.000 Mbps,
+      #     Uplink 39.000 Mbps
+      #   [info ] resultUrl: https://…
+      #
+      # — and the payload has a brace-delimited block followed by a
+      # BARE, unterminated list of server entries. A tag-only predicate
+      # therefore leaves a batch open on the server list and swallows
+      # the `Completed:` line into it, which is the only line in the
+      # whole run that carries the measured throughput. Measured
+      # against 0.157.0 on a real frame: 2 records, the second holding
+      # the server list and both summary lines glued together and
+      # arriving 5s late. Punctuation-scoped, the summary lines pass
+      # straight through as their own records, as they do today.
       #
       # THE `if` IS LOAD-BEARING. recombine has no pass-through: an
       # entry it accepts is appended to the open batch, whatever it is.
@@ -71,15 +143,18 @@ receivers:
       # through, unbatched (it may be emitted before the linkcheck
       # record, since that one waits for its closing brace).
       #
-      # The header test accepts BOTH gateway hostname shapes. A UDM
+      # The tag test accepts BOTH gateway hostname shapes. A UDM
       # doubles its hostname, so RFC3164 leaves the tag in `message`;
       # a device that does not double it gets `appname` set instead.
       # Matching only the first shape is exactly the bug in issue #24 —
       # both are checked here, and both are verified.
       #
       # Only one of is_first_entry and is_last_entry may be set, so the
-      # frame is bounded by its closing brace. A frame that never sends
-      # one is not lost and not held for ever: recombine's default
+      # frame is bounded by its closing brace — in either shape. The
+      # UNHEADED closing datagram IS the brace, so `body == "}"`; the
+      # HEADED one has the brace after the tag, so `body` ends `: }`.
+      # Both are tested, and a payload that never sends a brace at all
+      # is not lost and not held for ever: recombine's default
       # force_flush_period (5s) emits what it has. A well-formed frame
       # is emitted the moment the brace arrives, with no added latency.
       #
@@ -104,26 +179,149 @@ receivers:
       #     frame, which is a bad trade.
       #   - recombine warns once per batched entry that the entry has
       #     no source_identifier. The default identifier is a FILE
-      #     attribute that no UDP path ever sets, and the continuation
-      #     lines carry no attributes at all, so there is nothing to
-      #     point it at. Harmless: with one gateway there is only ever
-      #     one source, and pooling is what we want.
-      # Both are already dominated by the first bullet, so neither is
-      # worth an extra operator on every record to clean up.
+      #     attribute that no UDP path ever sets, so there is nothing
+      #     to point it at on any syslog entry, headed or not.
+      #     Harmless: with one gateway there is only ever one source,
+      #     and pooling is what we want. The collector samples its own
+      #     logs, so do not read the count as the number raised.
+      # The first is UNHEADED-only — a headed continuation parses
+      # cleanly and raises nothing — and it already dominates the
+      # second, so neither is worth an extra operator on every record
+      # to clean up.
       #
       # KNOWN LIMIT: because every entry pools into one batch, two
       # gateways running a speedtest at the same instant would have
-      # their lines interleaved, and the continuation lines carry no
-      # hostname to demultiplex on. Single-gateway sites are unaffected.
+      # their lines interleaved. On the UNHEADED shape there is nothing
+      # to demultiplex on at all; on the HEADED shape every datagram
+      # carries a hostname, but recombine has no way to say "close the
+      # batch this hostname opened", so it does not help. Single-gateway
+      # sites are unaffected, which is every site this has run on.
       - type: recombine
         if: >-
-          (attributes?.message != nil and attributes.message matches "\\{$"
-          and (attributes?.appname == "linkcheck"
-          or attributes.message matches "(^|\\s)linkcheck\\[[0-9]+\\]:"))
-          or (attributes?.message == nil and body matches "^[\\{\\}\"]")
+          (attributes?.message == nil and body matches "^[\\{\\}\"]")
+          or ((attributes?.appname == "linkcheck"
+          or (attributes?.message != nil
+          and attributes.message matches "(^|\\s)linkcheck\\[[0-9]+\\]:"))
+          and (body matches "\\{$"
+          or body matches "linkcheck\\[[0-9]+\\]:\\s+[\\}\"]"))
         combine_field: body
         combine_with: "\n"
-        is_last_entry: 'body == "}"'
+        is_last_entry: >-
+          body == "}" or body matches ":\\s\\}$"
+        max_unmatched_batch_size: 0
+
+      # ── Reassemble a re-headered continuation (issue #32) ───────────
+      # The same failure class as #9 with the opposite assumption, which
+      # is why it needs its own operator rather than another clause on
+      # the one above. A `linkcheck` continuation line carries NO
+      # header; this one carries a complete one.
+      #
+      # ubios-udapi-server's WAN failover ICMP monitor logs a
+      # single-quoted blob whose closing quote sits after a newline:
+      #
+      #   …: wan-failover-monitor-icmp: wf-monitor-… could not read
+      #      status from '/run/….sock'. Received data: '… 0.594
+      #   …: wan-failover-monitor-icmp: '
+      #
+      # Both lines arrive as complete RFC3164 frames — the full header
+      # AND the `wan-failover-monitor-icmp:` sub-tag are re-emitted on
+      # the second. Whether the daemon logs per line or rsyslog splits
+      # on the embedded newline is not decidable from a capture, and
+      # does not matter here: what reaches the receiver is two
+      # well-formed frames, the first missing its closing quote and the
+      # second carrying a lone `'` and nothing else.
+      #
+      # Untreated that is two records per complaint, one of them
+      # content-free, and an event.original on the first that is not a
+      # faithful copy of the payload — which this pipeline otherwise
+      # guarantees. Not merely cosmetic: over six hours on 2026-08-22
+      # this monitor produced 54,387 records in unifi.system against a
+      # steady state of ~700 per 2h for the whole dataset, and about
+      # half of the burst was the junk half-record.
+      #
+      # The #9 operator cannot be widened to cover it. Its
+      # continuation clause keys on `attributes?.message == nil`, which
+      # is precisely the assumption that fails here, and its delimiter
+      # is a brace or a double quote, not a single quote.
+      #
+      # THE MATCHER. Three conjuncts, and each one is doing work:
+      #
+      #   1. attributes?.message != nil — a header-less continuation
+      #      line (a linkcheck one, say) must not reach the tests
+      #      below, which would raise on a nil.
+      #   2. the entry is a ubios-udapi-server frame, in EITHER gateway
+      #      hostname shape. A UDM doubles its hostname so RFC3164
+      #      leaves the tag in `message`; a device that does not double
+      #      it gets `appname` set instead. Testing only the first
+      #      shape is the bug in issue #24, so both are tested and both
+      #      are exercised by the corpus.
+      #   3. the message ends in an UNTERMINATED quoted value:
+      #      `: '` followed by no further `'` before end of text. This
+      #      is the whole safety property. RE2 has no lookahead and
+      #      cannot count, but `: '[^']*$` needs neither — it asserts
+      #      directly that the last quote in the message opens a value
+      #      and nothing closes it.
+      #
+      # Deliberately NOT scoped to wan-failover-monitor-icmp. The bug
+      # is a property of the quoting, not of that one sub-tag, and
+      # ubios-udapi-server has more than one — `process:` is in the
+      # corpus alongside it — with nobody here having enumerated the
+      # rest or their payload shapes. Conjunct 3 is what makes
+      # generalising safe rather than reckless: it costs nothing to
+      # cover a sub-tag that never does this, because a terminated
+      # message can never match it. The tag anchor in conjunct 2 stays,
+      # though — dropping it would let ANY daemon's quoted line open a
+      # batch, which is exactly the over-match the #9 comment warns of.
+      #
+      # Verified against 0.157.0 by injection, not assumed: a
+      # ubios-udapi-server line with a CLOSED quote passes straight
+      # through as its own record, the `process:` frame with an
+      # apostrophe in its prose is untouched, and an unrelated systemd
+      # frame sent between the two datagrams of a real complaint is
+      # emitted separately rather than swallowed into the batch.
+      #
+      # WHAT IT STILL COSTS WHEN IT IS WRONG. A ubios-udapi-server line
+      # that genuinely ends `key: 'value` with no continuation to come
+      # opens a batch and waits out recombine's default
+      # force_flush_period before being emitted alone. Measured against
+      # 0.157.0: the record turned up 5.75s later, complete, correctly
+      # parsed and with nothing else attached to it. Bounded latency on
+      # one record, no loss — the same trade the #9 operator already
+      # makes for a stray brace-leading line. No line of that shape is
+      # in the corpus or in the capture behind #32; if one turns up it
+      # is the argument for narrowing this to named sub-tags.
+      #
+      # is_last_entry rather than is_first_entry: only one of the two
+      # may be set, and the frame is bounded at its end. Reading `body`
+      # and not `message` is deliberate — body is the raw frame on
+      # both hostname shapes, so one test covers both, where `message`
+      # differs between them.
+      #
+      # max_unmatched_batch_size MUST be 0, for the reason set out on
+      # the operator above: with is_last_entry the batch is
+      # "unmatched" until the closing entry arrives, and the default of
+      # 100 would silently split a longer payload into two records.
+      # This producer sends two datagrams, so the default is currently
+      # harmless — it is set anyway, because "currently harmless"
+      # depends on a payload length nobody controls.
+      #
+      # combine_field is body, so the reassembled event.original is the
+      # two datagrams exactly as they arrived, re-headered second line
+      # and all. That is what the wire carried and it is what the
+      # replay harness correlates on. The re-emitted header is stripped
+      # OUT OF `message` — not out of event.original — by section 0 of
+      # transform/device_syslog, which is where the reassembled record
+      # is put back together; see the comment there.
+      - type: recombine
+        if: >-
+          attributes?.message != nil
+          and (attributes?.appname == "ubios-udapi-server"
+          or attributes.message matches "(^|\\s)ubios-udapi-server\\[[0-9]+\\]:")
+          and attributes.message matches ": '[^']*$"
+        combine_field: body
+        combine_with: "\n"
+        is_last_entry: >-
+          body matches ": '$"
         max_unmatched_batch_size: 0
 
       # UniFi is not wholly CEF — only events routed through the SIEM

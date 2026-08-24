@@ -1,0 +1,32 @@
+# ONE real wan-failover-monitor-icmp frame, scrubbed. Captured from a
+# live gateway on UniFi Network 10.5.67 -- this is the actual shape
+#
+# ubios-udapi-server's WAN failover ICMP monitor logs a single-quoted
+# blob whose closing quote sits after a newline, and the second line
+# arrives as a COMPLETE syslog frame: full RFC3164 header, the
+# ubios-udapi-server tag and the wan-failover-monitor-icmp sub-tag all
+# re-emitted, with a lone closing quote as the entire payload
+#
+# That is the opposite of the linkcheck case in real-linkcheck, whose
+# continuation lines carry no header at all, and it is why the receiver
+# needs a second recombine operator. Untreated, this frame is TWO
+# records: one that has lost its closing quote and one that carries no
+# information whatsoever. See issue #32
+#
+# The two datagrams recombine into one record whose event original is
+# both raw frames joined -- the re-emitted header included, because
+# that is what the wire carried -- while the reassembled message and
+# body carry the payload with the framing removed
+#
+# Scrubbing note: the monitor names the same ping socket twice, once as
+# a path under /run and once bare inside the quoted blob. The scrubber
+# treats the first as a file path and leaves it, and the second as a
+# domain and pseudonymises it, so the two no longer agree. On the real
+# gateway they are the same string
+#
+# Everything between the markers is a wire unit, verbatim and in order.
+# Do not reindent it, and do not add comments or blank lines inside
+#[frame]
+<14>Aug 22 05:00:00 host-0a3 host-0a3 ubios-udapi-server[1597]: wan-failover-monitor-icmp: wf-monitor-gre1-9-icmp (203.0.113.101->203.0.113.204) could not read status from '/run/gre1-mon9-203.0.113.204-ping.ui.com.sock'. Received data: '9586714b2cc89.c.bf9.5e85aaf3.example.net 577458778 18124550218961239794 0.594
+<14>Aug 22 05:00:00 host-0a3 host-0a3 ubios-udapi-server[1597]: wan-failover-monitor-icmp: '
+#[/frame]

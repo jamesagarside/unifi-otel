@@ -583,6 +583,20 @@ A `linkcheck` frame from a different gateway or a different firmware
 would turn that into a pattern. Worth sending even if it looks
 identical — "identical" is the finding.
 
+A re-headed frame **has now been contributed**: `real-linkcheck-headed.txt`
+is a capture from UniFi Network 10.5.67, where the gateway re-emits the
+full RFC3164 header, hostname and tag on *every* datagram
+([#34](https://github.com/jamesagarside/unifi-otel/issues/34)). It
+settled the question the old fixture was guessing at — the head line now
+reads `[info ] {` — and it exposed that the payload is no longer one
+brace-delimited object at all.
+
+What is still wanted here is **a third gateway or firmware**, to say
+whether either shape is general. And specifically: a run in which the
+server-entry list is terminated, or one where the
+`Completed: Downlink … Uplink …` summary is absent or worded
+differently. Both are load-bearing guesses right now.
+
 The capture rules for this frame are stricter than for a single-line one:
 
 - **Capture off the wire**, with the socket recipe above. Each line is
@@ -592,9 +606,44 @@ The capture rules for this frame are stricter than for a single-line one:
   is line-oriented and will not disturb your line structure, but it
   cannot restore it either. Check with `diff -u` that only values
   changed and the line count did not.
-- **A `linkcheck` payload carries your ISP, the domain of its website
-  and a city.** The scrubber handles all three by JSON key, but read the
-  diff anyway.
+- **A `linkcheck` payload is the most sensitive frame in this project.**
+  It carries your ISP, the domain of its website, a city, your public
+  WAN address, and — in the client-info block — `lat`/`lon` **to your
+  own location**, not the test server's. Verified against a real
+  capture: `scrub.py` catches all of them, reporting the coordinates as
+  kind `coordinate` and zeroing them, and it catches `lat`/`lon` as well
+  as `latitude`/`longitude`. Read the diff anyway;
+  [#31](https://github.com/jamesagarside/unifi-otel/pull/31) exists
+  because an ISP field reached a golden once already. Never paste one of
+  these frames into an issue or a PR description.
+
+### Another `ubios-udapi-server` sub-tag that splits a quoted payload — [#32](https://github.com/jamesagarside/unifi-otel/issues/32)
+
+`wan-failover-monitor-icmp` logs a single-quoted blob whose closing
+quote lands on its own line, and the second datagram arrives as a
+**complete** frame with the header, the `ubios-udapi-server[pid]:` tag
+and the sub-tag all re-emitted in front of a lone `'`. The receiver now
+folds the pair back into one record.
+
+The predicate deliberately matches the **quoting**, not that sub-tag:
+any `ubios-udapi-server` message whose last `'` opens a value and never
+closes it is treated as the head of a split payload. That generalisation
+is currently supported by exactly one observed sub-tag, so what is
+wanted is either half of the question:
+
+- **a sibling sub-tag doing the same thing** — `linkstate`, `process`,
+  another `wan-failover-*`, anything. It would turn the generalisation
+  into an observation.
+- **a `ubios-udapi-server` line that ends on an open quote and is
+  genuinely complete**, with no continuation to come. That is the one
+  shape the predicate gets wrong: it holds the record for about five
+  seconds and then emits it alone. A real example is the only thing that
+  would justify narrowing the predicate back to named sub-tags.
+
+Capture rules are the `linkcheck` ones above, with one addition: **send
+both datagrams**. A capture of the head alone is indistinguishable from
+the bug this fixed, and a capture of the continuation alone is a lone
+quote mark.
 
 ---
 

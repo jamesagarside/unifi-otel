@@ -1,0 +1,30 @@
+# SYNTHETIC. The real frame in real-wan-failover with the hostname
+# doubling removed from BOTH of its datagrams -- the issue #24 axis for
+# the re-headered reassembly that issue #32 added
+#
+# It is not in a device pair file and it cannot be. The harness proves a
+# hostname pair by collapsing the doubled hostname in the first member
+# and requiring the second member exactly, and it collapses only the
+# FIRST line of a frame. Here every datagram carries a header, so both
+# lines would have to collapse. Rather than weaken that check for one
+# fixture, the two shapes are separate frames in separate files and the
+# goldens are what compare them: they must agree on every field except
+# the ones the two syslog shapes are known to differ on
+#
+# What this actually exercises. On the doubled shape the RFC3164 parser
+# cannot make a tag of the second hostname, so it leaves the whole
+# thing in message and appname is unset; the recombine predicate has to
+# find the tag by regex, and section 1b of the device transform
+# recovers the process name and pid. On this shape the parser finds the
+# tag, sets appname and proc id, and both of those paths are skipped.
+# Matching only the first shape is exactly the bug in issue #24
+#
+# No real single-hostname gateway frame has ever reached this project
+# (issue #20), so this is invented on top of an observation, the same
+# standing as every other single-hostname fixture here
+#
+# Everything between the markers is a wire unit, verbatim and in order
+#[frame]
+<14>Aug 22 05:00:00 host-0a3 ubios-udapi-server[1597]: wan-failover-monitor-icmp: wf-monitor-gre1-9-icmp (203.0.113.101->203.0.113.204) could not read status from '/run/gre1-mon9-203.0.113.204-ping.ui.com.sock'. Received data: '9586714b2cc89.c.bf9.5e85aaf3.example.net 577458778 18124550218961239794 0.594
+<14>Aug 22 05:00:00 host-0a3 ubios-udapi-server[1597]: wan-failover-monitor-icmp: '
+#[/frame]
