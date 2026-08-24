@@ -25,7 +25,7 @@ x-collector: &collector
   # Pinned to an exact tag on purpose: this config is verified against
   # one collector build, and OTTL and receiver behaviour do change
   # between releases. Do not float this to :latest. See issue #12.
-  image: otel/opentelemetry-collector-contrib:0.158.0
+  image: otel/opentelemetry-collector-contrib:0.159.0
 
   # The image is built FROM scratch — no shell, no wget, no curl — so a
   # container-side `healthcheck:` is impossible. The health_check
