@@ -313,6 +313,43 @@ processors:
           - 'set(log.attributes["unifi.session.usage_up"], log.attributes["cef_kv"]["UNIFIusageUp"]) where log.attributes["cef_kv"]["UNIFIusageUp"] != nil'
           - 'set(log.attributes["unifi.session.usage_down"], log.attributes["cef_kv"]["UNIFIusageDown"]) where log.attributes["cef_kv"]["UNIFIusageDown"] != nil'
 
+          # WiFi association method on client-connect (code 400).
+          # Vendor spelling kept verbatim ("wpapsk"): ECS has no field
+          # for the 802.11 auth method, and normalising it to something
+          # like "WPA2-PSK" would invent a vocabulary UniFi does not
+          # publish. unifi.access_method next to it is a DIFFERENT key
+          # (UNIFIaccessMethod, an audit field) -- do not merge them.
+          - 'set(log.attributes["unifi.auth_method"], log.attributes["cef_kv"]["UNIFIauthMethod"]) where log.attributes["cef_kv"]["UNIFIauthMethod"] != nil'
+
+          # Flow window on firewall records. UniFi formats these as a
+          # localised 12-hour string ("Aug 12, 2026 at 9:59:52.106 AM")
+          # with NO zone, in the console's local time -- verified on one
+          # record against its own UNIFIutcTime: flowEndTime 9:59:53.105
+          # AM against utcTime 08:59:53.306Z, exactly +01:00 (BST). So
+          # they are parsed with the same location as the syslog header.
+          #
+          # UNIFIflowDuration is deliberately NOT mapped. It is truncated
+          # to whole seconds -- the record above reports "0s" for a flow
+          # its own start/end timestamps put at 999ms -- so writing it to
+          # event.duration would publish a wrong number in an ECS field.
+          # event.duration is derived from the parsed pair instead, which
+          # keeps millisecond precision, and is only set when BOTH sides
+          # parsed so a half-failure cannot produce a bogus interval.
+          # Stored as epoch MILLISECONDS, not a formatted string. Time()
+          # returns a Go time.Time, which is not a valid attribute type
+          # -- setting one raises "unsupported type time.Time for set
+          # operation" and leaves the attribute Empty, which the replay
+          # harness caught. FormatTime() would render a string, but only
+          # in the parsed location, so it would emit "+0100" and rely on
+          # the backend accepting a colon-less ISO offset. Epoch millis
+          # has no such ambiguity: Elasticsearch's default date format is
+          # strict_date_optional_time||epoch_millis, so a long lands in a
+          # date field directly. Declare the mapping as `date`.
+          - 'set(log.attributes["event.start"], UnixMilli(Time(log.attributes["cef_kv"]["UNIFIflowStartTime"], "%b %d, %Y at %I:%M:%S.%L %p", "${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}"))) where log.attributes["cef_kv"]["UNIFIflowStartTime"] != nil'
+          - 'set(log.attributes["event.end"], UnixMilli(Time(log.attributes["cef_kv"]["UNIFIflowEndTime"], "%b %d, %Y at %I:%M:%S.%L %p", "${env:UNIFI_SYSLOG_TIMEZONE:-Etc/UTC}"))) where log.attributes["cef_kv"]["UNIFIflowEndTime"] != nil'
+          # ECS event.duration is NANOseconds; the pair above is millis.
+          - 'set(log.attributes["event.duration"], (log.attributes["event.end"] - log.attributes["event.start"]) * 1000000) where log.attributes["event.start"] != nil and log.attributes["event.end"] != nil'
+
           # Audit detail.
           - 'set(log.attributes["unifi.access_method"], log.attributes["cef_kv"]["UNIFIaccessMethod"]) where log.attributes["cef_kv"]["UNIFIaccessMethod"] != nil'
           - 'set(log.attributes["unifi.settings.section"], log.attributes["cef_kv"]["UNIFIsettingsSection"]) where log.attributes["cef_kv"]["UNIFIsettingsSection"] != nil'
