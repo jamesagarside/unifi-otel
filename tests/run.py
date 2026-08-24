@@ -51,7 +51,7 @@ PORTS_A = (45514, 46601, 44133)
 PORTS_B = (45515, 46602, 44134)
 
 # Only used if docker-compose.yml stops naming a pinned tag.
-FALLBACK_IMAGE = "otel/opentelemetry-collector-contrib:0.157.0"
+FALLBACK_IMAGE = "otel/opentelemetry-collector-contrib:0.158.0"
 
 # The timezone the goldens were generated under. NOT a suggestion: the
 # RFC3164 receiver stamps non-CEF records in this zone, so changing it

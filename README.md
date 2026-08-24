@@ -240,7 +240,7 @@ every decision in it:
 
 | | |
 | --- | --- |
-| Collector image | `otel/opentelemetry-collector-contrib:0.157.0`, pinned |
+| Collector image | `otel/opentelemetry-collector-contrib:0.158.0`, pinned |
 | Minimum supported | `0.157.0` |
 | Upstream Helm chart | `opentelemetry-collector` 0.168.0 |
 

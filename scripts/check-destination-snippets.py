@@ -26,7 +26,7 @@ than no checker.
 
 Usage:
     python3 scripts/check-destination-snippets.py
-    python3 scripts/check-destination-snippets.py --image otel/...:0.157.0
+    python3 scripts/check-destination-snippets.py --image otel/...:0.158.0
     python3 scripts/check-destination-snippets.py --doc docs/destinations.md
 
 Exit codes:
@@ -65,9 +65,9 @@ def pinned_image() -> str:
     try:
         text = DEFAULT_COMPOSE.read_text()
     except OSError:
-        return "otel/opentelemetry-collector-contrib:0.157.0"
+        return "otel/opentelemetry-collector-contrib:0.158.0"
     m = re.search(r"image:\s*(otel/opentelemetry-collector-contrib:\S+)", text)
-    return m.group(1) if m else "otel/opentelemetry-collector-contrib:0.157.0"
+    return m.group(1) if m else "otel/opentelemetry-collector-contrib:0.158.0"
 
 
 def nearest_heading(text: str, pos: int) -> str:

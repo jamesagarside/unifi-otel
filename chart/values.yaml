@@ -68,7 +68,7 @@ opentelemetry-collector:
   # against (see appVersion in Chart.yaml).
   image:
     repository: otel/opentelemetry-collector-contrib
-    tag: "0.157.0"
+    tag: "0.158.0"
     pullPolicy: IfNotPresent
   # ── Ports ──────────────────────────────────────────────────────────
   # The receivers bind unprivileged ports inside the container so the pod
